@@ -1,0 +1,1 @@
+#pip install psutil pyperclip pywin32 selenium webdriver-manager speech_recognition gradio openai yt-dlp pygame python-vlc
