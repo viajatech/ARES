@@ -1,0 +1,3150 @@
+#Recuerda darle like al repositorio como forma de agradecimiento; https://github.com/viajatech/ARES/  
+#(Hecho por David Ruiz alias @viajatech 
+
+#Agradecimiento especial a Anthropic A.I al otorgar su tecnologia a 1,000 desarrolladores en el mundo y ser uno de los seleccionados
+
+#pip install psutil pyperclip pywin32 selenium webdriver-manager speech_recognition gradio openai yt-dlp pygame python-vlc
+
+# =============================================================================
+#  TRON ARES by Viaja Tech
+#    - Word, Excel, Notepad, Chrome, Firefox
+#    - Descarga videos y música de YouTube y otras plataformas
+#    - Reproducción de música y videos descargados
+# =============================================================================
+
+import os
+import sys
+import time
+import datetime
+import threading
+import subprocess
+import tempfile
+import logging
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, PhotoImage
+import json
+from io import BytesIO
+import re
+import glob
+import shutil  # Para operaciones de archivos
+
+# Dependencias comunes
+import psutil
+import pyperclip
+import pythoncom
+import win32com.client as win32
+
+# Selenium para navegadores
+import urllib.parse
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.firefox import GeckoDriverManager
+import pywintypes
+
+# STT / TTS
+import speech_recognition as sr
+try:
+    import azure.cognitiveservices.speech as speechsdk
+    azure_available = True
+except ImportError:
+    azure_available = False
+
+# Gradio para interfaz de chat
+import gradio as gr
+
+# OpenAI -> LM Studio
+from openai import OpenAI
+
+# yt-dlp para descarga de videos/música
+import yt_dlp
+
+# Reproducción de medios
+try:
+    import pygame
+    pygame_available = True
+except ImportError:
+    pygame_available = False
+
+try:
+    import vlc
+    vlc_available = True
+except ImportError:
+    vlc_available = False
+
+###############################################################################
+#                         LOGGING MEJORADO
+###############################################################################
+# Configurar logging para mostrar en consola Y archivo
+logger = logging.getLogger("TRON_ARES")
+logger.setLevel(logging.DEBUG)
+
+# Crear manejador para archivo
+file_handler = logging.FileHandler('tron_ares.log', mode='w')
+file_handler.setLevel(logging.INFO)
+file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_format)
+
+# Crear manejador para consola
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG)  # Mostrar todo en consola
+console_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_format)
+
+# Añadir ambos manejadores al logger
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Sobrescribir logging estándar para asegurar que todo se muestre
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('tron_ares_basic.log')
+    ]
+)
+
+###############################################################################
+#                     LIMPIEZA DE CACHÉ WIN32COM
+###############################################################################
+def clear_win32com_cache():
+    """Limpia la caché de win32com para evitar errores con COM"""
+    logger.info("Limpiando caché de win32com...")
+    try:
+        # Obtener la ruta del directorio de caché
+        cache_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 
+                                 'Temp', 'gen_py')
+        
+        # Verificar si existe y eliminar
+        if os.path.exists(cache_dir):
+            logger.info(f"Eliminando directorio de caché: {cache_dir}")
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            return True
+        else:
+            logger.info("No se encontró directorio de caché para limpiar")
+            return True
+    except Exception as e:
+        logger.error(f"Error al limpiar caché de win32com: {str(e)}")
+        return False
+
+###############################################################################
+#                      UTILIDADES PARA DESCARGAS DIRECTAS
+###############################################################################
+def clean_youtube_url(url):
+    """Limpia y normaliza una URL de YouTube para extraer el ID del video correctamente"""
+    # Registrar la URL original para debugging
+    logger.info(f"URL original a limpiar: {url}")
+    
+    # Patrones comunes de URL de YouTube
+    patterns = [
+        r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})',
+        r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            video_id = match.group(1)
+            cleaned_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"URL limpiada: {cleaned_url}")
+            return cleaned_url
+    
+    # Si no coincide con ningún patrón, devolver la URL original
+    logger.warning(f"No se pudo limpiar URL: {url} - usando original")
+    return url
+
+def direct_download_media(url, is_audio=False, format_type="mp4"):
+    """Descarga multimedia directamente permitiendo elegir carpeta destino"""
+    if not url:
+        logger.error("URL vacía proporcionada para descarga")
+        return False, "URL vacía"
+    
+    # Limpia y normaliza la URL
+    logger.info(f"Iniciando descarga desde URL: {url}")
+    cleaned_url = clean_youtube_url(url)
+    logger.info(f"URL limpia a usar: {cleaned_url}")
+    
+    # Usar el Escritorio como ubicación predeterminada
+    default_path = os.path.expanduser("~/Desktop")
+    logger.info(f"Ruta predeterminada: {default_path}")
+    
+    # Configurar Tkinter para diálogo de carpeta
+    try:
+        # Crear ventana Tk para diálogos
+        root = tk.Tk()
+        root.withdraw()  # Ocultar ventana principal
+        root.attributes('-topmost', True)  # Asegurar que aparezca en primer plano
+        
+        # Mostrar diálogo en primer plano
+        logger.info("Mostrando diálogo para seleccionar carpeta destino...")
+        print("\n[ACCIÓN REQUERIDA] Por favor selecciona la carpeta donde guardar la descarga.")
+        
+        save_path = filedialog.askdirectory(
+            title="Selecciona dónde guardar la descarga",
+            initialdir=default_path
+        )
+        
+        # Si el usuario cancela, usar la ubicación predeterminada
+        if not save_path:
+            save_path = default_path
+            logger.info(f"No se seleccionó carpeta, usando predeterminada: {save_path}")
+        else:
+            logger.info(f"Carpeta seleccionada: {save_path}")
+    except Exception as e:
+        logger.error(f"Error al mostrar diálogo de carpeta: {str(e)}")
+        save_path = default_path
+        logger.info(f"Usando carpeta predeterminada debido a error: {save_path}")
+    
+    # Verificar que existe la carpeta destino
+    if not os.path.exists(save_path):
+        logger.info(f"Creando carpeta destino: {save_path}")
+        try:
+            os.makedirs(save_path)
+        except Exception as e:
+            logger.error(f"Error al crear carpeta destino: {str(e)}")
+            return False, f"Error al crear carpeta destino: {str(e)}"
+    
+    # Inicia la descarga en un hilo separado
+    # Usar un hilo daemon para que termine cuando la aplicación principal termine
+    download_thread = threading.Thread(
+        target=_direct_download_thread,
+        args=(cleaned_url, save_path, is_audio, format_type),
+        daemon=True
+    )
+    
+    logger.info(f"Iniciando hilo de descarga para {cleaned_url}")
+    download_thread.start()
+    
+    return True, f"Descarga iniciada: {url} como {'audio' if is_audio else 'video'} en formato {format_type}. Se guardará en {save_path}."
+
+def _direct_download_thread(url, save_path, is_audio, format_type):
+    """Función de hilo para descargar multimedia con barra de progreso mejorada"""
+    logger.info(f"Hilo de descarga iniciado para {url}")
+    print(f"\n[DESCARGA] Iniciando descarga desde {url}")
+    print(f"[DESCARGA] Guardando {'audio' if is_audio else 'video'} en: {save_path}")
+    
+    try:
+        # Verificar que la carpeta destino existe
+        if not os.path.exists(save_path):
+            logger.info(f"Creando carpeta destino desde el hilo: {save_path}")
+            os.makedirs(save_path)
+        
+        logger.info(f"Obteniendo información del video: {url}")
+        print(f"[DESCARGA] Obteniendo información del video...")
+        
+        # Obtener el título con más opciones para mejorar la compatibilidad
+        info_opts = {
+            'quiet': False,
+            'no_warnings': False,
+            'ignoreerrors': False,
+            'geo_bypass': True,
+            'nocheckcertificate': True,
+        }
+        
+        # Variable para almacenar información del video
+        video_info = None
+        
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
+            try:
+                info_dict = ydl.extract_info(url, download=False)
+                if info_dict is None:
+                    raise Exception("No se pudo obtener información del video")
+                
+                # Guardar info para uso posterior
+                video_info = info_dict
+                
+                video_title = info_dict.get('title', 'video')
+                safe_title = "".join([c if c.isalnum() or c in ' ._-' else '_' for c in video_title])
+                logger.info(f"Título del video: {video_title}")
+                print(f"[DESCARGA] Título: {video_title}")
+                
+                # Mostrar detalles adicionales si están disponibles
+                if 'duration' in info_dict:
+                    mins, secs = divmod(info_dict['duration'], 60)
+                    print(f"[DESCARGA] Duración: {mins}:{secs:02d}")
+                
+                if 'channel' in info_dict:
+                    print(f"[DESCARGA] Canal: {info_dict['channel']}")
+            except Exception as info_error:
+                logger.error(f"Error al obtener información: {str(info_error)}")
+                print(f"[ERROR] No se pudo obtener información: {str(info_error)}")
+                # Usar un título genérico si no se puede obtener el real
+                import uuid
+                safe_title = f"video_{uuid.uuid4().hex[:8]}"
+        
+        # Crear directorio temporal para la descarga
+        temp_dir = os.path.join(save_path, f".temp_{int(time.time())}")
+        logger.info(f"Creando directorio temporal: {temp_dir}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Función mejorada para mostrar progreso con barra visual
+        def progress_hook(d):
+            if d['status'] == 'downloading':
+                percent = d.get('_percent_str', 'desconocido')
+                speed = d.get('_speed_str', 'desconocido')
+                eta = d.get('_eta_str', 'desconocido')
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
+                
+                # Crear barra de progreso en texto
+                if total > 0:
+                    bar_length = 40
+                    progress = downloaded / total
+                    block = int(round(bar_length * progress))
+                    progress_bar = "█" * block + "░" * (bar_length - block)
+                    
+                    status_line = f"\r[PROGRESO] |{progress_bar}| {percent} @ {speed}, ETA: {eta}"
+                    print(status_line, end="")
+                    sys.stdout.flush()  # Forzar actualización inmediata
+                else:
+                    status_line = f"\r[DESCARGANDO] {percent} @ {speed}, ETA: {eta}"
+                    print(status_line, end="")
+                    sys.stdout.flush()  # Forzar actualización inmediata
+                
+                # Registrar progreso periódicamente (no cada iteración para evitar sobrecarga)
+                if downloaded % (1024*1024*5) < 1024:  # Cada ~5MB
+                    logger.info(f"Progreso: {percent} a {speed}, ETA: {eta}")
+            
+            elif d['status'] == 'finished':
+                print("\n[DESCARGA] Archivo descargado. Procesando...")
+                logger.info("Descarga finalizada. Iniciando post-procesamiento.")
+        
+        # Configurar opciones de descarga mejoradas
+        ydl_opts = {
+            'format': "bestaudio/best" if is_audio else "best",
+            'outtmpl': os.path.join(temp_dir, f"{safe_title}.%(ext)s"),
+            'progress_hooks': [progress_hook],
+            'quiet': False,
+            'no_warnings': False,
+            'verbose': True,  # Añadir verbose para más información
+            'ignoreerrors': False,
+            'geo_bypass': True,
+            'nocheckcertificate': True,
+        }
+        
+        if is_audio:
+            logger.info(f"Configurando descarga de audio en formato {format_type}")
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': format_type,
+                'preferredquality': '192',
+            }]
+        
+        # Imprimir confirmación de opciones
+        print(f"[DESCARGA] Modo: {'Audio' if is_audio else 'Video'}, Formato: {format_type}")
+        
+        # Descargar con yt-dlp
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            logger.info(f"Iniciando descarga con yt-dlp: {url}")
+            print(f"[DESCARGA] Iniciando descarga...")
+            ydl.download([url])
+        
+        # Procesar los archivos descargados
+        if is_audio:
+            logger.info(f"Procesando archivos de audio descargados...")
+            print(f"[DESCARGA] Procesando archivos de audio...")
+            
+            audio_files = glob.glob(os.path.join(temp_dir, f"*.{format_type}"))
+            if audio_files:
+                for file in audio_files:
+                    dest_file = os.path.join(save_path, os.path.basename(file))
+                    logger.info(f"Moviendo audio de {file} a {dest_file}")
+                    
+                    # Si existe el destino, eliminarlo primero
+                    if os.path.exists(dest_file):
+                        os.remove(dest_file)
+                    
+                    # Mover el archivo
+                    os.rename(file, dest_file)
+                    print(f"[COMPLETADO] Audio guardado como: {os.path.basename(dest_file)}")
+                    logger.info(f"Audio guardado correctamente: {dest_file}")
+            else:
+                logger.warning(f"No se encontraron archivos de audio en {temp_dir}")
+                print(f"[ADVERTENCIA] No se encontraron archivos de audio en formato esperado.")
+                
+                # Buscar cualquier archivo de audio que pueda haber sido generado
+                any_audio = glob.glob(os.path.join(temp_dir, "*.mp3")) + \
+                            glob.glob(os.path.join(temp_dir, "*.m4a")) + \
+                            glob.glob(os.path.join(temp_dir, "*.opus")) + \
+                            glob.glob(os.path.join(temp_dir, "*.wav"))
+                
+                if any_audio:
+                    logger.info(f"Encontrados formatos de audio alternativos: {any_audio}")
+                    print(f"[RECUPERACIÓN] Encontrados {len(any_audio)} archivos de audio en otros formatos.")
+                    
+                    for file in any_audio:
+                        dest_file = os.path.join(save_path, os.path.basename(file))
+                        
+                        # Si existe el destino, eliminarlo primero
+                        if os.path.exists(dest_file):
+                            os.remove(dest_file)
+                        
+                        # Mover el archivo
+                        os.rename(file, dest_file)
+                        print(f"[COMPLETADO] Audio guardado como: {os.path.basename(dest_file)}")
+                        logger.info(f"Audio alternativo guardado: {dest_file}")
+        else:
+            logger.info(f"Procesando archivos de video descargados...")
+            print(f"[DESCARGA] Procesando archivos de video...")
+            
+            # Excluir archivos parciales o temporales
+            video_files = glob.glob(os.path.join(temp_dir, "*.*"))
+            video_files = [f for f in video_files if not f.endswith(('.part', '.ytdl'))]
+            
+            if not video_files:
+                logger.warning(f"No se encontraron archivos de video en {temp_dir}")
+                print(f"[ERROR] No se encontraron archivos de video.")
+                
+                # Listar todos los archivos en el directorio para diagnóstico
+                all_files = os.listdir(temp_dir) if os.path.exists(temp_dir) else []
+                logger.info(f"Archivos en directorio temporal: {all_files}")
+                print(f"[DIAGNÓSTICO] Archivos en directorio temporal: {all_files}")
+            else:
+                # Procesar el primer archivo encontrado
+                source_file = video_files[0]
+                ext = os.path.splitext(source_file)[1][1:]
+                
+                # Si no se especificó formato, usar la extensión del archivo
+                if not format_type:
+                    format_type = ext if ext else "mp4"
+                
+                # Construir nombre de archivo final
+                final_filename = f"{safe_title}.{format_type}"
+                output_filename = os.path.join(save_path, final_filename)
+                
+                logger.info(f"Archivo fuente: {source_file}")
+                logger.info(f"Extensión detectada: {ext}")
+                logger.info(f"Guardando como: {output_filename}")
+                
+                print(f"[DESCARGA] Archivo original: {os.path.basename(source_file)}")
+                
+                # Si la extensión es diferente, realizar conversión
+                if ext != format_type:
+                    logger.info(f"Convirtiendo de {ext} a {format_type}...")
+                    print(f"[PROCESANDO] Convirtiendo de formato {ext} a {format_type}...")
+                    
+                    # Comando FFmpeg para convertir
+                    cmd = [
+                        'ffmpeg', '-y', '-i', source_file,
+                        '-c:v', 'libx264', '-preset', 'fast',
+                        '-c:a', 'aac', '-b:a', '192k',
+                        output_filename
+                    ]
+                    
+                    logger.info(f"Ejecutando comando: {' '.join(cmd)}")
+                    
+                    # Ejecutar FFmpeg y capturar salida
+                    process = subprocess.Popen(
+                        cmd, 
+                        stdout=subprocess.PIPE, 
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
+                    
+                    # Mostrar progreso de FFmpeg
+                    for line in process.stderr:
+                        if "time=" in line and "bitrate=" in line:
+                            print(f"\r[CONVIRTIENDO] {line.strip()}", end="")
+                    
+                    # Esperar a que termine
+                    process.wait()
+                    logger.info(f"Resultado FFmpeg: {process.returncode}")
+                    
+                    # Verificar si la conversión fue exitosa
+                    if not os.path.exists(output_filename) or os.path.getsize(output_filename) == 0:
+                        logger.warning("Conversión fallida. Usando archivo original.")
+                        print(f"\n[ADVERTENCIA] Conversión fallida. Usando archivo original.")
+                        
+                        # Usar el archivo original
+                        fallback_output = os.path.join(save_path, os.path.basename(source_file))
+                        if os.path.exists(fallback_output):
+                            os.remove(fallback_output)
+                        os.rename(source_file, fallback_output)
+                        output_filename = fallback_output
+                        logger.info(f"Archivo guardado sin convertir: {fallback_output}")
+                        print(f"[COMPLETADO] Video guardado como: {os.path.basename(fallback_output)}")
+                    else:
+                        logger.info(f"Conversión exitosa: {output_filename}")
+                        print(f"\n[COMPLETADO] Video convertido y guardado como: {os.path.basename(output_filename)}")
+                else:
+                    # Solo mover el archivo si la extensión ya es la deseada
+                    logger.info(f"No es necesario convertir. Moviendo archivo...")
+                    if os.path.exists(output_filename):
+                        os.remove(output_filename)
+                    os.rename(source_file, output_filename)
+                    logger.info(f"Archivo guardado: {output_filename}")
+                    print(f"[COMPLETADO] Video guardado como: {os.path.basename(output_filename)}")
+        
+        # Limpieza del directorio temporal
+        try:
+            logger.info(f"Limpiando directorio temporal: {temp_dir}")
+            print(f"[LIMPIEZA] Eliminando archivos temporales...")
+            
+            for file in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, file)
+                if os.path.isfile(file_path):
+                    os.unlink(file_path)
+            os.rmdir(temp_dir)
+            logger.info(f"Directorio temporal limpiado correctamente")
+        except Exception as e:
+            logger.warning(f"Advertencia durante la limpieza: {str(e)}")
+            print(f"[ADVERTENCIA] No se pudieron eliminar todos los archivos temporales: {str(e)}")
+        
+        print(f"\n[DESCARGA COMPLETA] {'Audio' if is_audio else 'Video'} guardado en: {save_path}")
+        logger.info(f"Proceso de descarga completado exitosamente")
+        
+    except Exception as e:
+        logger.error(f"Error durante la descarga directa: {str(e)}")
+        print(f"\n[ERROR CRÍTICO] Durante la descarga: {str(e)}")
+        
+        # Intentar rescatar archivos parciales
+        try:
+            if 'temp_dir' in locals() and os.path.exists(temp_dir):
+                partial_files = glob.glob(os.path.join(temp_dir, "*.*"))
+                if partial_files:
+                    logger.info(f"Intentando rescatar {len(partial_files)} archivos parciales")
+                    print(f"[RECUPERACIÓN] Intentando rescatar archivos parcialmente descargados...")
+                    
+                    for file in partial_files:
+                        # Solo rescatar archivos con tamaño significativo (más de 1MB)
+                        if os.path.getsize(file) > 1024*1024:
+                            dest_file = os.path.join(save_path, f"partial_{os.path.basename(file)}")
+                            if os.path.exists(dest_file):
+                                os.remove(dest_file)
+                            os.rename(file, dest_file)
+                            logger.info(f"Archivo parcial rescatado: {dest_file}")
+                            print(f"[RECUPERADO] Archivo parcial: {os.path.basename(dest_file)}")
+        except Exception as rescue_error:
+            logger.error(f"Error durante el rescate de archivos: {str(rescue_error)}")
+            print(f"[ERROR] Al intentar rescatar archivos: {str(rescue_error)}")
+
+###############################################################################
+#                      REPRODUCCIÓN MULTIMEDIA
+###############################################################################
+class MediaPlayerFrame(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent, padding="20")
+        self.parent = parent
+        
+        # Variables de control
+        self.current_audio = None
+        self.current_video = None
+        self.vlc_instance = None
+        self.vlc_player = None
+        self.is_playing = False
+        self.playlist = []
+        self.current_index = 0
+        
+        # Inicializar pygame para audio
+        if pygame_available:
+            pygame.mixer.init()
+        
+        # Inicializar VLC para video
+        if vlc_available:
+            self.vlc_instance = vlc.Instance("--no-xlib")
+            self.vlc_player = self.vlc_instance.media_player_new()
+        
+        self.create_widgets()
+    
+    def create_widgets(self):
+        # Título
+        header_label = ttk.Label(self, text="Reproductor Multimedia", 
+                                style="Header.TLabel", font=("Arial", 16, "bold"))
+        header_label.pack(pady=10)
+        
+        # Marco para archivos
+        file_frame = ttk.LabelFrame(self, text="Archivos")
+        file_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Lista de reproducción
+        playlist_frame = ttk.Frame(file_frame)
+        playlist_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        scrollbar = ttk.Scrollbar(playlist_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.playlist_box = tk.Listbox(playlist_frame, yscrollcommand=scrollbar.set, 
+                                      font=("Arial", 10), height=15)
+        self.playlist_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.playlist_box.yview)
+        
+        self.playlist_box.bind("<Double-1>", self.play_selected)
+        
+        # Botones para gestionar archivos
+        file_buttons_frame = ttk.Frame(file_frame)
+        file_buttons_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        add_button = ttk.Button(file_buttons_frame, text="Añadir archivos", command=self.add_files)
+        add_button.pack(side=tk.LEFT, padx=5)
+        
+        remove_button = ttk.Button(file_buttons_frame, text="Eliminar seleccionado", command=self.remove_selected)
+        remove_button.pack(side=tk.LEFT, padx=5)
+        
+        clear_button = ttk.Button(file_buttons_frame, text="Limpiar lista", command=self.clear_playlist)
+        clear_button.pack(side=tk.LEFT, padx=5)
+        
+        # Marco para controles de reproducción
+        control_frame = ttk.LabelFrame(self, text="Controles")
+        control_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Información de reproducción actual
+        self.now_playing_var = tk.StringVar(value="No hay reproducción en curso")
+        now_playing_label = ttk.Label(control_frame, textvariable=self.now_playing_var)
+        now_playing_label.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Controles básicos
+        basic_controls = ttk.Frame(control_frame)
+        basic_controls.pack(fill=tk.X, padx=5, pady=5)
+        
+        prev_button = ttk.Button(basic_controls, text="⏮", width=5, command=self.play_previous)
+        prev_button.pack(side=tk.LEFT, padx=5)
+        
+        self.play_button = ttk.Button(basic_controls, text="▶", width=5, command=self.play_pause)
+        self.play_button.pack(side=tk.LEFT, padx=5)
+        
+        stop_button = ttk.Button(basic_controls, text="⏹", width=5, command=self.stop)
+        stop_button.pack(side=tk.LEFT, padx=5)
+        
+        next_button = ttk.Button(basic_controls, text="⏭", width=5, command=self.play_next)
+        next_button.pack(side=tk.LEFT, padx=5)
+        
+        # Control de volumen
+        volume_frame = ttk.Frame(control_frame)
+        volume_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        volume_label = ttk.Label(volume_frame, text="Volumen:")
+        volume_label.pack(side=tk.LEFT, padx=5)
+        
+        self.volume_var = tk.IntVar(value=70)
+        volume_scale = ttk.Scale(volume_frame, from_=0, to=100, orient=tk.HORIZONTAL,
+                               variable=self.volume_var, command=self.change_volume)
+        volume_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        self.mute_var = tk.BooleanVar(value=False)
+        mute_check = ttk.Checkbutton(volume_frame, text="Silencio", variable=self.mute_var,
+                                    command=self.toggle_mute)
+        mute_check.pack(side=tk.LEFT, padx=5)
+        
+        # Carpeta de descargas
+        downloads_frame = ttk.LabelFrame(self, text="Carpeta de descargas")
+        downloads_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.downloads_path_var = tk.StringVar(value=os.path.expanduser("~/Downloads"))
+        path_entry = ttk.Entry(downloads_frame, textvariable=self.downloads_path_var, width=50)
+        path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        
+        browse_button = ttk.Button(downloads_frame, text="Explorar", 
+                                 command=self.browse_downloads_folder)
+        browse_button.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        refresh_button = ttk.Button(downloads_frame, text="Actualizar",
+                                  command=self.refresh_from_downloads)
+        refresh_button.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # Inicializar lista con archivos de la carpeta de descargas
+        self.refresh_from_downloads()
+        
+        # Iniciar un temporizador para actualizar el estado del reproductor
+        self.update_player_status()
+    
+    def add_files(self):
+        files = filedialog.askopenfilenames(
+            title="Seleccionar archivos multimedia",
+            filetypes=[
+                ("Archivos multimedia", "*.mp3 *.mp4 *.wav *.avi *.mkv *.webm *.m4a *.opus *.flac"),
+                ("Archivos de audio", "*.mp3 *.wav *.m4a *.opus *.flac"),
+                ("Archivos de video", "*.mp4 *.avi *.mkv *.webm"),
+                ("Todos los archivos", "*.*")
+            ]
+        )
+        if files:
+            for file in files:
+                if file not in self.playlist:
+                    self.playlist.append(file)
+                    self.playlist_box.insert(tk.END, os.path.basename(file))
+    
+    def remove_selected(self):
+        selected_index = self.playlist_box.curselection()
+        if selected_index:
+            index = selected_index[0]
+            self.playlist_box.delete(index)
+            del self.playlist[index]
+            
+            # Si eliminamos la pista actual, detenemos la reproducción
+            if index == self.current_index and self.is_playing:
+                self.stop()
+    
+    def clear_playlist(self):
+        self.stop()
+        self.playlist_box.delete(0, tk.END)
+        self.playlist = []
+        self.current_index = 0
+    
+    def browse_downloads_folder(self):
+        folder = filedialog.askdirectory(
+            title="Seleccionar carpeta de descargas",
+            initialdir=self.downloads_path_var.get()
+        )
+        if folder:
+            self.downloads_path_var.set(folder)
+            self.refresh_from_downloads()
+    
+    def refresh_from_downloads(self):
+        """Actualiza la lista de reproducción con los archivos multimedia de la carpeta de descargas"""
+        downloads_folder = self.downloads_path_var.get()
+        if not os.path.exists(downloads_folder):
+            return
+        
+        # Limpiar la lista actual
+        self.clear_playlist()
+        
+        # Buscar archivos multimedia en la carpeta
+        media_extensions = ['.mp3', '.mp4', '.wav', '.avi', '.mkv', '.webm', '.m4a', '.opus', '.flac']
+        for file in os.listdir(downloads_folder):
+            file_path = os.path.join(downloads_folder, file)
+            if os.path.isfile(file_path) and os.path.splitext(file)[1].lower() in media_extensions:
+                self.playlist.append(file_path)
+                self.playlist_box.insert(tk.END, file)
+        
+        # También buscar en el escritorio (lugar común para descargas)
+        desktop_path = os.path.expanduser("~/Desktop")
+        if os.path.exists(desktop_path) and desktop_path != downloads_folder:
+            for file in os.listdir(desktop_path):
+                file_path = os.path.join(desktop_path, file)
+                if os.path.isfile(file_path) and os.path.splitext(file)[1].lower() in media_extensions:
+                    self.playlist.append(file_path)
+                    self.playlist_box.insert(tk.END, file)
+    
+    def play_selected(self, event=None):
+        selected_index = self.playlist_box.curselection()
+        if selected_index:
+            index = selected_index[0]
+            self.current_index = index
+            self.play_file(self.playlist[index])
+    
+    def play_file(self, file_path):
+        self.stop()  # Detener cualquier reproducción actual
+        
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        # Archivos de audio
+        if file_ext in ['.mp3', '.wav', '.m4a', '.opus', '.flac']:
+            if pygame_available:
+                try:
+                    pygame.mixer.music.load(file_path)
+                    pygame.mixer.music.set_volume(self.volume_var.get() / 100)
+                    pygame.mixer.music.play()
+                    self.current_audio = file_path
+                    self.current_video = None
+                    self.is_playing = True
+                    self.play_button.config(text="⏸")
+                    self.now_playing_var.set(f"▶ {os.path.basename(file_path)}")
+                except Exception as e:
+                    messagebox.showerror("Error de reproducción", str(e))
+                    self.is_playing = False
+            else:
+                messagebox.showwarning("Pygame no disponible", 
+                                      "Para reproducir audio instala pygame: pip install pygame")
+        
+        # Archivos de video
+        elif file_ext in ['.mp4', '.avi', '.mkv', '.webm']:
+            if vlc_available and self.vlc_player:
+                try:
+                    media = self.vlc_instance.media_new(file_path)
+                    self.vlc_player.set_media(media)
+                    self.vlc_player.play()
+                    self.current_video = file_path
+                    self.current_audio = None
+                    self.is_playing = True
+                    self.play_button.config(text="⏸")
+                    self.now_playing_var.set(f"▶ {os.path.basename(file_path)}")
+                except Exception as e:
+                    messagebox.showerror("Error de reproducción", str(e))
+                    self.is_playing = False
+            else:
+                messagebox.showwarning("VLC no disponible", 
+                                     "Para reproducir video instala python-vlc: pip install python-vlc")
+        else:
+            messagebox.showwarning("Formato no soportado", 
+                                 f"El formato {file_ext} no es compatible con el reproductor.")
+    
+    def play_pause(self):
+        if not self.playlist:
+            messagebox.showinfo("Lista vacía", "Añade archivos a la lista de reproducción primero.")
+            return
+        
+        if not self.is_playing:
+            # Si no hay reproducción en curso, pero hay una lista, reproducir el elemento actual
+            if self.current_index < len(self.playlist):
+                self.play_file(self.playlist[self.current_index])
+        else:
+            # Si hay reproducción, pausar/reanudar
+            if self.current_audio and pygame_available:
+                if pygame.mixer.music.get_busy():
+                    pygame.mixer.music.pause()
+                    self.play_button.config(text="▶")
+                else:
+                    pygame.mixer.music.unpause()
+                    self.play_button.config(text="⏸")
+            
+            if self.current_video and vlc_available and self.vlc_player:
+                if self.vlc_player.is_playing():
+                    self.vlc_player.pause()
+                    self.play_button.config(text="▶")
+                else:
+                    self.vlc_player.play()
+                    self.play_button.config(text="⏸")
+    
+    def stop(self):
+        self.is_playing = False
+        self.play_button.config(text="▶")
+        self.now_playing_var.set("No hay reproducción en curso")
+        
+        if self.current_audio and pygame_available:
+            pygame.mixer.music.stop()
+            self.current_audio = None
+        
+        if self.current_video and vlc_available and self.vlc_player:
+            self.vlc_player.stop()
+            self.current_video = None
+    
+    def play_next(self):
+        if not self.playlist:
+            return
+        
+        self.current_index = (self.current_index + 1) % len(self.playlist)
+        self.play_file(self.playlist[self.current_index])
+        # Seleccionar en la lista
+        self.playlist_box.selection_clear(0, tk.END)
+        self.playlist_box.selection_set(self.current_index)
+        self.playlist_box.see(self.current_index)
+    
+    def play_previous(self):
+        if not self.playlist:
+            return
+        
+        self.current_index = (self.current_index - 1) % len(self.playlist)
+        self.play_file(self.playlist[self.current_index])
+        # Seleccionar en la lista
+        self.playlist_box.selection_clear(0, tk.END)
+        self.playlist_box.selection_set(self.current_index)
+        self.playlist_box.see(self.current_index)
+    
+    def change_volume(self, value=None):
+        volume = self.volume_var.get() / 100
+        
+        if pygame_available:
+            pygame.mixer.music.set_volume(volume)
+        
+        if vlc_available and self.vlc_player:
+            self.vlc_player.audio_set_volume(int(volume * 100))
+    
+    def toggle_mute(self):
+        if self.mute_var.get():
+            if pygame_available:
+                pygame.mixer.music.set_volume(0)
+            if vlc_available and self.vlc_player:
+                self.vlc_player.audio_set_volume(0)
+        else:
+            self.change_volume()
+    
+    def update_player_status(self):
+        """Actualiza el estado del reproductor periódicamente"""
+        if self.is_playing:
+            # Verificar si el audio ha terminado
+            if self.current_audio and pygame_available:
+                if not pygame.mixer.music.get_busy():
+                    self.play_next()
+            
+            # Verificar si el video ha terminado (más complejo con VLC)
+            if self.current_video and vlc_available and self.vlc_player:
+                if self.vlc_player.get_state() == vlc.State.Ended:
+                    self.play_next()
+        
+        # Actualizar cada 500ms
+        self.after(500, self.update_player_status)
+    
+    def play_file_by_name(self, filename):
+        """Busca un archivo por nombre y lo reproduce"""
+        # Primero intentar una búsqueda exacta
+        for i, file_path in enumerate(self.playlist):
+            if os.path.basename(file_path).lower() == filename.lower():
+                self.current_index = i
+                self.play_file(file_path)
+                self.playlist_box.selection_clear(0, tk.END)
+                self.playlist_box.selection_set(self.current_index)
+                self.playlist_box.see(self.current_index)
+                logger.info(f"Reproduciendo archivo exacto: {filename}")
+                return True
+        
+        # Si no encontró el archivo exacto, buscar coincidencias parciales
+        for i, file_path in enumerate(self.playlist):
+            if filename.lower() in os.path.basename(file_path).lower():
+                self.current_index = i
+                self.play_file(file_path)
+                self.playlist_box.selection_clear(0, tk.END)
+                self.playlist_box.selection_set(self.current_index)
+                self.playlist_box.see(self.current_index)
+                logger.info(f"Reproduciendo coincidencia parcial: {os.path.basename(file_path)}")
+                return True
+        
+        # Si aún no se encuentra, buscar nuevos archivos
+        logger.info(f"Archivo {filename} no encontrado, actualizando lista...")
+        self.refresh_from_downloads()
+        
+        # Intentar una vez más con la lista actualizada
+        for i, file_path in enumerate(self.playlist):
+            if filename.lower() in os.path.basename(file_path).lower():
+                self.current_index = i
+                self.play_file(file_path)
+                self.playlist_box.selection_clear(0, tk.END)
+                self.playlist_box.selection_set(self.current_index)
+                self.playlist_box.see(self.current_index)
+                logger.info(f"Reproduciendo archivo tras actualización: {os.path.basename(file_path)}")
+                return True
+        
+        logger.warning(f"No se pudo encontrar el archivo: {filename}")
+        return False
+
+###############################################################################
+#                    DESCARGADOR DE VIDEOS/MÚSICA
+###############################################################################
+class VideoDownloaderFrame(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent, padding="20")
+        self.parent = parent
+        
+        # Configure style
+        self.style = ttk.Style()
+        self.style.configure("TButton", font=("Arial", 12))
+        self.style.configure("TLabel", font=("Arial", 12))
+        self.style.configure("Header.TLabel", font=("Arial", 16, "bold"))
+        
+        # Header
+        header_frame = ttk.Frame(self)
+        header_frame.pack(fill=tk.X, pady=5)
+        
+        header_label = ttk.Label(header_frame, text="Descargador de Contenido Multimedia", 
+                                style="Header.TLabel")
+        header_label.pack(pady=10)
+        
+        # URL input
+        url_frame = ttk.Frame(self)
+        url_frame.pack(fill=tk.X, pady=10)
+        
+        url_label = ttk.Label(url_frame, text="URL Video/Playlist:")
+        url_label.pack(side=tk.LEFT, padx=5)
+        
+        self.url_entry = ttk.Entry(url_frame, width=50, font=("Arial", 12))
+        self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.url_entry.focus()
+        
+        # Playlist download checkbox
+        self.playlist_var = tk.BooleanVar(value=False)
+        playlist_check = ttk.Checkbutton(url_frame, text="Descargar lista completa", variable=self.playlist_var)
+        playlist_check.pack(side=tk.RIGHT, padx=5)
+        
+        # Download location
+        location_frame = ttk.Frame(self)
+        location_frame.pack(fill=tk.X, pady=10)
+        
+        location_label = ttk.Label(location_frame, text="Guardar en:")
+        location_label.pack(side=tk.LEFT, padx=5)
+        
+        self.location_entry = ttk.Entry(location_frame, width=40, font=("Arial", 12))
+        self.location_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.location_entry.insert(0, os.path.expanduser("~/Desktop"))
+        
+        browse_button = ttk.Button(location_frame, text="Explorar", command=self.browse_location)
+        browse_button.pack(side=tk.RIGHT, padx=5)
+        
+        # Format selection
+        format_frame = ttk.Frame(self)
+        format_frame.pack(fill=tk.X, pady=10)
+        
+        # Format type selection (Video or Audio)
+        self.format_type = tk.StringVar(value="video")
+        
+        format_type_frame = ttk.LabelFrame(format_frame, text="Tipo de Descarga")
+        format_type_frame.pack(fill=tk.X, pady=5)
+        
+        video_radio = ttk.Radiobutton(format_type_frame, text="Video", variable=self.format_type, 
+                                     value="video", command=self.update_format_options)
+        video_radio.pack(side=tk.LEFT, padx=20, pady=5)
+        
+        audio_radio = ttk.Radiobutton(format_type_frame, text="Solo Audio", variable=self.format_type, 
+                                     value="audio", command=self.update_format_options)
+        audio_radio.pack(side=tk.LEFT, padx=20, pady=5)
+        
+        # Video/Audio format options
+        options_frame = ttk.LabelFrame(self, text="Opciones de Formato")
+        options_frame.pack(fill=tk.X, pady=10)
+        
+        # Quality selection
+        quality_frame = ttk.Frame(options_frame)
+        quality_frame.pack(fill=tk.X, pady=5, padx=10)
+        
+        quality_label = ttk.Label(quality_frame, text="Calidad:")
+        quality_label.pack(side=tk.LEFT, padx=5)
+        
+        self.quality_var = tk.StringVar(value="best")
+        self.quality_combobox = ttk.Combobox(quality_frame, textvariable=self.quality_var, width=25)
+        self.quality_combobox.pack(side=tk.LEFT, padx=5, expand=True)
+        
+        # Container/Format selection
+        container_frame = ttk.Frame(options_frame)
+        container_frame.pack(fill=tk.X, pady=5, padx=10)
+        
+        self.format_label = ttk.Label(container_frame, text="Formato:")
+        self.format_label.pack(side=tk.LEFT, padx=5)
+        
+        self.container_var = tk.StringVar(value="mp4")
+        
+        self.container_combobox = ttk.Combobox(container_frame, textvariable=self.container_var, width=10)
+        self.container_combobox.pack(side=tk.LEFT, padx=5)
+        
+        # Speed option
+        speed_frame = ttk.Frame(options_frame)
+        speed_frame.pack(fill=tk.X, pady=5, padx=10)
+        
+        speed_label = ttk.Label(speed_frame, text="Velocidad de conversión:")
+        speed_label.pack(side=tk.LEFT, padx=5)
+        
+        self.speed_var = tk.StringVar(value="fast")
+        speed_combobox = ttk.Combobox(speed_frame, textvariable=self.speed_var, 
+                                     values=["slow", "medium", "fast", "ultrafast"], width=10)
+        speed_combobox.pack(side=tk.LEFT, padx=5)
+        
+        # Initialize format options
+        self.update_format_options()
+        
+        # Buttons
+        buttons_frame = ttk.Frame(self)
+        buttons_frame.pack(fill=tk.X, pady=20)
+        
+        self.download_button = ttk.Button(buttons_frame, text="Descargar", command=self.start_download)
+        self.download_button.pack(side=tk.LEFT, padx=5)
+        
+        self.cancel_button = ttk.Button(buttons_frame, text="Cancelar", command=self.cancel_download, state=tk.DISABLED)
+        self.cancel_button.pack(side=tk.LEFT, padx=5)
+        
+        self.info_button = ttk.Button(buttons_frame, text="Obtener Info del Video", command=self.get_video_info)
+        self.info_button.pack(side=tk.LEFT, padx=5)
+        
+        # Progress frame
+        progress_frame = ttk.Frame(self)
+        progress_frame.pack(fill=tk.X, pady=10)
+        
+        self.progress_label = ttk.Label(progress_frame, text="")
+        self.progress_label.pack(side=tk.TOP, anchor=tk.W, pady=5)
+        
+        self.progress_bar = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, length=100, mode='determinate')
+        self.progress_bar.pack(fill=tk.X, pady=5)
+        
+        # Status log
+        log_frame = ttk.Frame(self)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        log_label = ttk.Label(log_frame, text="Estado:")
+        log_label.pack(anchor=tk.W)
+        
+        log_container = ttk.Frame(log_frame)
+        log_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.log_text = tk.Text(log_container, height=12, width=50, font=("Consolas", 10))
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.log_text.config(state=tk.DISABLED)
+        
+        # Scrollbar for log
+        scrollbar = ttk.Scrollbar(log_container, command=self.log_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.config(yscrollcommand=scrollbar.set)
+        
+        # Download attributes
+        self.downloading = False
+        self.ydl = None
+        self.download_thread = None
+        self.video_info = None
+        
+        # Check for FFmpeg
+        if not self.check_ffmpeg():
+            self.log_message("ADVERTENCIA: FFmpeg no encontrado. Instale FFmpeg para todas las funcionalidades.")
+            messagebox.showwarning("FFmpeg No Encontrado", 
+                "FFmpeg no se encuentra en su sistema. Instale FFmpeg para una correcta conversión de audio y video.")
+        
+    def check_ffmpeg(self):
+        """Verifica si FFmpeg está instalado en el sistema"""
+        try:
+            with open(os.devnull, "w") as devnull:
+                subprocess.call(["ffmpeg", "-version"], stdout=devnull, stderr=devnull)
+            return True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return False
+        
+    def update_format_options(self):
+        if self.format_type.get() == "video":
+            # Video quality options
+            video_qualities = [
+                "best", 
+                "bestvideo[height>=2160]+bestaudio/best[height>=2160]", # 4K
+                "bestvideo[height>=1440]+bestaudio/best[height>=1440]", # 2K
+                "bestvideo[height>=1080]+bestaudio/best[height>=1080]", # 1080p
+                "bestvideo[height>=720]+bestaudio/best[height>=720]",  # 720p
+                "bestvideo[height>=480]+bestaudio/best[height>=480]",  # 480p
+                "bestvideo[height>=360]+bestaudio/best[height>=360]"   # 360p
+            ]
+            self.quality_combobox['values'] = video_qualities
+            self.quality_var.set("best")
+            
+            # Video container options
+            video_formats = ["mp4", "mkv", "webm", "avi", "mov", "flv"]
+            self.container_combobox['values'] = video_formats
+            self.container_var.set("mp4")
+            
+            self.format_label.config(text="Formato de Video:")
+        else:
+            # Audio quality options
+            audio_qualities = [
+                "bestaudio", 
+                "bestaudio[abr>=256]", # High quality
+                "bestaudio[abr>=192]", # Medium quality
+                "bestaudio[abr>=128]", # Standard quality
+                "bestaudio[abr>=96]"   # Low quality
+            ]
+            self.quality_combobox['values'] = audio_qualities
+            self.quality_var.set("bestaudio")
+            
+            # Audio container options
+            audio_formats = ["mp3", "m4a", "opus", "wav", "aac", "flac"]
+            self.container_combobox['values'] = audio_formats
+            self.container_var.set("mp3")
+            
+            self.format_label.config(text="Formato de Audio:")
+        
+    def browse_location(self):
+        directory = filedialog.askdirectory(initialdir=self.location_entry.get())
+        if directory:
+            self.location_entry.delete(0, tk.END)
+            self.location_entry.insert(0, directory)
+    
+    def log_message(self, message):
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"{message}\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+        logger.info(message)
+        
+    def progress_hook(self, d):
+        if d['status'] == 'downloading':
+            try:
+                percent = d.get('_percent_str', 'N/A')
+                speed = d.get('_speed_str', 'N/A')
+                eta = d.get('_eta_str', 'N/A')
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
+                
+                # Crear barra de progreso visual en la terminal
+                if total > 0:
+                    bar_length = 40
+                    progress = downloaded / total
+                    block = int(round(bar_length * progress))
+                    progress_bar = "█" * block + "░" * (bar_length - block)
+                    print(f"\rProgreso: |{progress_bar}| {percent} @ {speed}, ETA: {eta}", end="")
+                    sys.stdout.flush()
+                
+                progress_text = f"Descargando... {percent} a {speed}, Tiempo restante: {eta}"
+                self.after(0, lambda: self.update_progress(progress_text, downloaded, total))
+            except Exception as e:
+                logger.error(f"Error en progress_hook: {str(e)}")
+        elif d['status'] == 'finished':
+            print("\nDescarga completa. Procesando archivo...")
+            self.after(0, lambda: self.log_message("Descarga completa. Procesando..."))
+    
+    def update_progress(self, text, current, total):
+        self.progress_label.config(text=text)
+        if total > 0:
+            percent = (current / total) * 100
+            self.progress_bar['value'] = percent
+    
+    def get_video_info(self):
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showerror("Error", "Por favor ingresa una URL")
+            return
+            
+        self.progress_label.config(text="Obteniendo información del video...")
+        self.log_message(f"Obteniendo información de: {url}")
+        
+        self.info_button.config(state=tk.DISABLED)
+        self.download_button.config(state=tk.DISABLED)
+        
+        threading.Thread(target=self.fetch_video_info, args=(url,), daemon=True).start()
+        
+    def fetch_video_info(self, url):
+        try:
+            url = clean_youtube_url(url)  # Limpia la URL
+            self.after(0, lambda: self.log_message(f"URL procesada: {url}"))
+            
+            ydl_opts = {
+                'quiet': False,
+                'no_warnings': False,
+                'ignoreerrors': True,
+                'geo_bypass': True,
+                'nocheckcertificate': True
+            }
+            if not self.playlist_var.get():
+                ydl_opts['noplaylist'] = True
+            
+            logger.info(f"Obteniendo info del video con yt-dlp: {url}")
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    info_dict = ydl.extract_info(url, download=False)
+                    if info_dict is None:
+                        raise Exception("No se pudo obtener información del video")
+                    
+                    # Guardar info para uso posterior
+                    self.video_info = info_dict
+                    
+                    self.after(0, lambda: self.show_video_info(info_dict))
+                except Exception as e:
+                    self.after(0, lambda: self.log_message(f"Error al extraer información: {str(e)}"))
+                    self.after(0, lambda: self.reset_buttons())
+        except Exception as e:
+            logger.error(f"Error al obtener información del video: {str(e)}")
+            self.after(0, lambda: self.log_message(f"Error al obtener información: {str(e)}"))
+            self.after(0, lambda: self.reset_buttons())
+            
+    def show_video_info(self, info):
+        if info:
+            if 'entries' in info:
+                playlist_title = info.get('title', 'Playlist')
+                entries = info.get('entries', [])
+                
+                if entries:
+                    self.log_message(f"Playlist: {playlist_title} - {len(entries)} videos encontrados")
+                    for idx, entry in enumerate(entries, start=1):
+                        if entry:
+                            title = entry.get('title', f"Video {idx}")
+                            self.log_message(f"{idx}. {title}")
+                else:
+                    self.log_message(f"Playlist: {playlist_title} - Sin videos o info restringida")
+            else:
+                title = info.get('title', 'Título desconocido')
+                duration = info.get('duration', 0)
+                minutes, seconds = divmod(duration, 60)
+                self.log_message(f"Título: {title}")
+                self.log_message(f"Duración: {minutes}:{seconds:02d}")
+                
+                # Información sobre el canal
+                if 'channel' in info:
+                    self.log_message(f"Canal: {info['channel']}")
+                
+                # Información sobre formatos
+                video_formats = set()
+                audio_formats = set()
+                max_height = 0
+                for f in info.get('formats', []):
+                    if f.get('height'):
+                        video_formats.add(f"{f.get('height')}p")
+                        if f.get('height') > max_height:
+                            max_height = f.get('height')
+                    elif f.get('format_note') == 'audio only':
+                        acodec = f.get('acodec', 'unknown')
+                        if acodec != 'none':
+                            audio_formats.add(f"{acodec} ({f.get('ext', 'unknown')})")
+                
+                if video_formats:
+                    sorted_video = sorted([int(f.replace('p', '')) for f in video_formats if 'p' in f], reverse=True)
+                    self.log_message(f"Calidades de video disponibles: {', '.join([f'{q}p' for q in sorted_video])}")
+                if audio_formats:
+                    self.log_message(f"Formatos de audio disponibles: {', '.join(audio_formats)}")
+                
+                # Destacar calidades especiales
+                if max_height >= 2160:
+                    self.log_message("¡Calidad 4K disponible!")
+                elif max_height >= 1440:
+                    self.log_message("¡Calidad 2K disponible!")
+                elif max_height >= 1080:
+                    self.log_message("¡Calidad Full HD disponible!")
+        
+        self.reset_buttons()
+            
+    def reset_buttons(self):
+        self.info_button.config(state=tk.NORMAL)
+        self.download_button.config(state=tk.NORMAL)
+        self.progress_label.config(text="Listo para descargar")
+        
+    def start_download(self):
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showerror("Error", "Por favor ingresa una URL")
+            return
+        
+        # Limpiar y normalizar la URL
+        url = clean_youtube_url(url)
+        self.log_message(f"URL procesada: {url}")
+        
+        save_path = self.location_entry.get().strip()
+        if not os.path.isdir(save_path):
+            try:
+                os.makedirs(save_path)
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo crear el directorio: {str(e)}")
+                return
+        
+        quality_option = self.quality_var.get()
+        container_format = self.container_var.get()
+        speed_preset = self.speed_var.get()
+        download_playlist = self.playlist_var.get()
+        is_audio = self.format_type.get() == "audio"
+        
+        self.downloading = True
+        self.download_button.config(state=tk.DISABLED)
+        self.info_button.config(state=tk.DISABLED)
+        self.cancel_button.config(state=tk.NORMAL)
+        self.progress_bar['value'] = 0
+        self.progress_label.config(text="Preparando descarga...")
+        
+        # Mostrar información clara en la terminal también
+        print(f"\n[DESCARGA] Iniciando descarga de {'AUDIO' if is_audio else 'VIDEO'} desde: {url}")
+        print(f"[DESCARGA] Guardando en: {save_path}")
+        print(f"[DESCARGA] Formato: {container_format}, Calidad: {quality_option}")
+        if download_playlist:
+            print(f"[DESCARGA] MODO PLAYLIST ACTIVADO - Se descargarán todos los videos de la lista")
+        
+        self.log_message(f"Iniciando descarga desde: {url}")
+        if download_playlist:
+            self.log_message("Modo Playlist activado: se descargarán TODOS los videos de la lista.")
+        else:
+            self.log_message(f"Calidad seleccionada: {quality_option}, Formato: {container_format}, Velocidad: {speed_preset}")
+        
+        temp_dir = os.path.join(save_path, f".temp_{int(time.time())}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        self.download_thread = threading.Thread(
+            target=self.perform_download, 
+            args=(url, save_path, temp_dir, quality_option, container_format, speed_preset, download_playlist)
+        )
+        self.download_thread.daemon = True
+        self.download_thread.start()
+    
+    def perform_download(self, url, save_path, temp_dir, quality_option, container_format, speed_preset, download_playlist):
+        try:
+            is_audio_only = self.format_type.get() == "audio"
+            output_filename = None
+            
+            ffmpeg_presets = {
+                "slow": "medium",
+                "medium": "fast",
+                "fast": "veryfast",
+                "ultrafast": "ultrafast"
+            }
+            ffmpeg_preset = ffmpeg_presets.get(speed_preset, "fast")
+            
+            try:
+                with yt_dlp.YoutubeDL({'quiet': True, 'ignoreerrors': True, 'geo_bypass': True}) as ydl:
+                    info_dict = ydl.extract_info(url, download=False)
+                    if info_dict is None:
+                        raise Exception("No se pudo obtener información del video")
+                    if 'entries' in info_dict:
+                        video_title = info_dict.get('title', 'playlist')
+                    else:
+                        video_title = info_dict.get('title', 'video')
+                    safe_title = "".join([c if c.isalnum() or c in ' ._-' else '_' for c in video_title])
+            except Exception as info_error:
+                self.after(0, lambda: self.log_message(f"Error al obtener información: {str(info_error)}"))
+                # Usar un título genérico si no se puede obtener el real
+                import uuid
+                safe_title = f"video_{uuid.uuid4().hex[:8]}"
+            
+            # Si es playlist, incluir el índice de cada video en el nombre de archivo
+            if download_playlist:
+                temp_output = os.path.join(temp_dir, f"{safe_title}_%(playlist_index)s.%(ext)s")
+            else:
+                temp_output = os.path.join(temp_dir, f"{safe_title}.%(ext)s")
+            
+            ydl_opts = {
+                'format': quality_option,
+                'outtmpl': temp_output,
+                'progress_hooks': [self.progress_hook],
+                'quiet': False,
+                'no_warnings': False,
+                'verbose': True,
+                'ignoreerrors': True,
+                'geo_bypass': True,
+                'nocheckcertificate': True
+            }
+            if not download_playlist:
+                ydl_opts['noplaylist'] = True
+            
+            if is_audio_only:
+                self.after(0, lambda: self.log_message("Descargando audio..."))
+                audio_codec_map = {
+                    'mp3': 'libmp3lame',
+                    'm4a': 'aac',
+                    'opus': 'libopus',
+                    'wav': 'pcm_s16le',
+                    'aac': 'aac',
+                    'flac': 'flac'
+                }
+                audio_codec = audio_codec_map.get(container_format, 'aac')
+                ydl_opts['format'] = "bestaudio/best"
+                ydl_opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': container_format,
+                    'preferredquality': '192',
+                }]
+                ydl_opts['postprocessor_args'] = [
+                    '-c:a', audio_codec,
+                ]
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                self.ydl = ydl
+                ydl.download([url])
+            
+            if is_audio_only:
+                audio_files = glob.glob(os.path.join(temp_dir, f"*.{container_format}"))
+                if audio_files:
+                    # Si es playlist, mover todos los archivos descargados
+                    if download_playlist:
+                        for file in audio_files:
+                            dest_file = os.path.join(save_path, os.path.basename(file))
+                            if os.path.exists(dest_file):
+                                os.remove(dest_file)
+                            os.rename(file, dest_file)
+                        output_filename = f"{safe_title} (Playlist)"
+                    else:
+                        temp_file = audio_files[0]
+                        output_filename = os.path.join(save_path, os.path.basename(temp_file))
+                        if os.path.exists(output_filename):
+                            os.remove(output_filename)
+                        os.rename(temp_file, output_filename)
+                        self.after(0, lambda: self.log_message(f"Audio guardado como: {os.path.basename(output_filename)}"))
+                else:
+                    # Buscar cualquier archivo de audio que pueda haber sido generado
+                    any_audio = glob.glob(os.path.join(temp_dir, "*.mp3")) + \
+                                glob.glob(os.path.join(temp_dir, "*.m4a")) + \
+                                glob.glob(os.path.join(temp_dir, "*.opus")) + \
+                                glob.glob(os.path.join(temp_dir, "*.wav")) + \
+                                glob.glob(os.path.join(temp_dir, "*.aac")) + \
+                                glob.glob(os.path.join(temp_dir, "*.flac"))
+                    if any_audio:
+                        self.after(0, lambda: self.log_message(f"Encontrados otros formatos de audio: {len(any_audio)} archivos"))
+                        for file in any_audio:
+                            dest_file = os.path.join(save_path, os.path.basename(file))
+                            if os.path.exists(dest_file):
+                                os.remove(dest_file)
+                            os.rename(file, dest_file)
+                            self.after(0, lambda: self.log_message(f"Audio alternativo guardado como: {os.path.basename(dest_file)}"))
+                        output_filename = any_audio[0]
+                    else:
+                        raise Exception("No se encontró el archivo de audio descargado")
+            else:
+                video_files = glob.glob(os.path.join(temp_dir, "*.*"))
+                video_files = [f for f in video_files if not f.endswith(('.part', '.ytdl'))]
+                if not video_files:
+                    # Listar todos los archivos en el directorio para diagnóstico
+                    all_files = os.listdir(temp_dir) if os.path.exists(temp_dir) else []
+                    self.after(0, lambda: self.log_message(f"Archivos en directorio temporal: {all_files}"))
+                    raise Exception("Fallo al descargar el video")
+                
+                if download_playlist:
+                    # Para playlists, se asume que yt-dlp ya generó archivos con el índice en el nombre
+                    for file in video_files:
+                        dest_file = os.path.join(save_path, os.path.basename(file))
+                        if os.path.exists(dest_file):
+                            os.remove(dest_file)
+                        os.rename(file, dest_file)
+                        self.after(0, lambda: self.log_message(f"Video guardado como: {os.path.basename(dest_file)}"))
+                    output_filename = f"{safe_title} (Playlist)"
+                else:
+                    source_file = video_files[0]
+                    ext = os.path.splitext(source_file)[1][1:]
+                    final_filename = f"{safe_title}.{container_format}"
+                    output_filename = os.path.join(save_path, final_filename)
+                    
+                    self.after(0, lambda: self.log_message(f"Archivo fuente: {os.path.basename(source_file)}"))
+                    
+                    if ext != container_format:
+                        self.after(0, lambda: self.log_message(f"Convirtiendo a formato {container_format}..."))
+                        self.after(0, lambda: self.update_progress("Convirtiendo formato de video...", 50, 100))
+                        
+                        cmd = [
+                            'ffmpeg', '-y', '-i', source_file,
+                            '-c:v', 'libx264', '-preset', ffmpeg_preset,
+                            '-c:a', 'aac', '-b:a', '192k',
+                            output_filename
+                        ]
+                        
+                        # Imprimir el comando para diagnóstico
+                        cmd_str = " ".join(cmd)
+                        self.after(0, lambda: self.log_message(f"Comando FFmpeg: {cmd_str}"))
+                        
+                        try:
+                            print(f"\n[CONVIRTIENDO] Ejecutando FFmpeg para convertir formato...")
+                            process = subprocess.Popen(
+                                cmd, 
+                                stdout=subprocess.PIPE, 
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True
+                            )
+                            
+                            # Capturar y mostrar salida de FFmpeg
+                            for line in process.stderr:
+                                if "time=" in line and "bitrate=" in line:
+                                    print(f"\r[CONVIRTIENDO] {line.strip()}", end="")
+                                    sys.stdout.flush()
+                            
+                            # Esperar a que termine
+                            result = process.wait()
+                            print("\n[CONVERSIÓN] Proceso de FFmpeg finalizado")
+                        except Exception as e:
+                            self.after(0, lambda: self.log_message(f"Error durante la conversión: {str(e)}"))
+                            result = -1
+                        
+                        if not os.path.exists(output_filename) or os.path.getsize(output_filename) == 0:
+                            # Si la conversión falló, intentamos copiar el archivo original
+                            self.after(0, lambda: self.log_message("Conversión fallida. Copiando archivo original..."))
+                            fallback_output = os.path.join(save_path, os.path.basename(source_file))
+                            if os.path.exists(fallback_output):
+                                os.remove(fallback_output)
+                            os.rename(source_file, fallback_output)
+                            output_filename = fallback_output
+                            self.after(0, lambda: self.log_message(f"Archivo guardado sin convertir como: {os.path.basename(fallback_output)}"))
+                    else:
+                        # Solo mover el archivo
+                        if os.path.exists(output_filename):
+                            os.remove(output_filename)
+                        os.rename(source_file, output_filename)
+                        self.after(0, lambda: self.log_message(f"Archivo guardado como: {os.path.basename(output_filename)}"))
+            
+            try:
+                for file in os.listdir(temp_dir):
+                    file_path = os.path.join(temp_dir, file)
+                    if os.path.isfile(file_path):
+                        os.unlink(file_path)
+                os.rmdir(temp_dir)
+            except Exception as e:
+                self.after(0, lambda: self.log_message(f"Advertencia de limpieza: {str(e)}"))
+            
+            self.after(0, lambda: self.download_complete(True, output_filename))
+        
+        except Exception as e:
+            self.after(0, lambda: self.log_message(f"Error durante la descarga: {str(e)}"))
+            self.after(0, lambda: self.download_complete(False, str(e)))
+    
+    def download_complete(self, success, message):
+        self.downloading = False
+        self.ydl = None
+        
+        self.download_button.config(state=tk.NORMAL)
+        self.info_button.config(state=tk.NORMAL)
+        self.cancel_button.config(state=tk.DISABLED)
+        
+        if success:
+            self.progress_label.config(text="¡Descarga completada exitosamente!")
+            self.log_message(f"Descarga completada: {os.path.basename(message) if os.path.exists(message) else message}")
+            resp = messagebox.askyesno("Descarga Completa", "¡Descarga completada! ¿Abrir carpeta contenedora?")
+            if resp:
+                self.open_folder(os.path.dirname(message) if os.path.exists(message) else self.location_entry.get())
+        else:
+            self.progress_label.config(text="Fallo en la descarga")
+            self.log_message(f"Error durante la descarga: {message}")
+            messagebox.showerror("Error de Descarga", f"Fallo al descargar: {message}")
+    
+    def cancel_download(self):
+        if self.downloading:
+            self.log_message("Cancelando descarga...")
+            self.downloading = False
+            if self.ydl:
+                if self.download_thread and self.download_thread.is_alive():
+                    pass
+            self.download_button.config(state=tk.NORMAL)
+            self.info_button.config(state=tk.NORMAL)
+            self.cancel_button.config(state=tk.DISABLED)
+            self.progress_label.config(text="Descarga cancelada")
+    
+    def open_folder(self, folder_path):
+        try:
+            if os.name == 'nt':
+                os.startfile(folder_path)
+            elif os.name == 'posix':
+                subprocess.Popen(['xdg-open', folder_path])
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo abrir la carpeta: {str(e)}")
+    
+    # Método para descarga programática (para usar desde el chatbot)
+    def download_from_url(self, url, is_audio=False, format_type="mp4"):
+        """Inicia una descarga programáticamente desde el chatbot"""
+        if not url:
+            return False, "URL vacía"
+        
+        # En lugar de modificar widgets de tkinter, usamos la función de descarga directa
+        return direct_download_media(url, is_audio, format_type)
+        
+###############################################################################
+#                      TKINTER SUPER AGENTE (MODIFICADO)
+###############################################################################
+class MultiAppLauncher:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("TRON ARES by Viaja Tech")
+        self.root.geometry("1200x800")
+        self.root.resizable(False, False)
+
+        # Word
+        self.word_doc = None
+
+        # Excel
+        self.excel_app = None
+        self.excel_sheet = None
+
+        # Notepad
+        self.notepad_temp_file = None
+        self.notepad_live_sync = False
+
+        # Browsers
+        self.chrome_driver = None
+        self.firefox_driver = None
+
+        # Downloader y Player
+        self.downloader = None
+        self.media_player = None
+
+        # Social placeholders
+        self.social_drivers = {
+            'x': None,
+            'facebook': None,
+            'instagram': None,
+            'threads': None,
+            'tiktok': None,
+            'youtube': None,
+            'github': None,
+            'vimeo': None
+        }
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(pady=10, expand=True)
+
+        self.text_areas = {}
+        self.last_update = 0
+        self.update_delay = 500
+
+        if os.name != 'nt':
+            messagebox.showerror("SO no compatible", "Este script sólo funciona en Windows.")
+            self.root.destroy()
+            sys.exit()
+
+        self.create_all_tabs()
+
+        close_btn = tk.Button(
+            self.root,
+            text="Cerrar Aplicación",
+            command=self.cerrar_aplicacion,
+            bg="#FF0000",
+            fg="white",
+            font=("Arial", 12),
+            padx=20,
+            pady=10
+        )
+        close_btn.pack(pady=5)
+
+    def create_all_tabs(self):
+        self.create_notepad_tab()
+        self.create_word_tab()
+        self.create_excel_tab()
+        self.create_firefox_tab()
+        self.create_chrome_tab()
+        
+        # Nuevas pestañas para descargar y reproducir multimedia
+        self.create_downloader_tab()
+        self.create_media_player_tab()
+
+    # ------------------ NOTEPAD ------------------
+    def create_notepad_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Bloc de Notas / Notepad")
+
+        lbl = tk.Label(tab, text="Texto para Notepad:", font=("Arial", 12))
+        lbl.pack(pady=5)
+
+        frame_txt = tk.Frame(tab)
+        frame_txt.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(frame_txt)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text_area = tk.Text(
+            frame_txt,
+            wrap=tk.WORD,
+            width=80,
+            height=20,
+            font=("Arial", 12),
+            yscrollcommand=scrollbar.set
+        )
+        text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_area.yview)
+
+        self.text_areas['notepad'] = text_area
+        text_area.bind('<KeyRelease>', lambda e: self.on_text_change(text_area))
+
+        btn_notepad_once = tk.Button(
+            tab,
+            text="Abrir Notepad (una vez)",
+            command=lambda: self.enviar_a_notepad_una_vez(text_area),
+            bg="#555555",
+            fg="white",
+            font=("Arial", 12),
+            padx=20,
+            pady=10
+        )
+        btn_notepad_once.pack(pady=5)
+
+    def enviar_a_notepad_una_vez(self, text_widget):
+        texto = text_widget.get("1.0", tk.END).strip()
+        if not texto:
+            messagebox.showwarning("Aviso", "Ingresa texto antes de abrir Notepad.")
+            return
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode='w', encoding='utf-8') as tmp:
+                tmp.write(texto)
+                self.notepad_temp_file = tmp.name
+
+            subprocess.Popen(['notepad.exe', self.notepad_temp_file])
+            self.notepad_live_sync = False
+            self._auto_save_notepad_immediate()
+
+        except Exception as e:
+            logger.warning(f"Error Notepad: {e}")
+
+    def _auto_save_notepad_immediate(self):
+        if not self.notepad_temp_file:
+            return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_path = os.path.join(os.getcwd(), f"auto_saved_notepad_{ts}.txt")
+        try:
+            with open(self.notepad_temp_file, 'r', encoding='utf-8') as src:
+                content = src.read()
+            with open(default_path, 'w', encoding='utf-8') as dst:
+                dst.write(content)
+            logger.warning(f"[Auto-Saved Notepad] => {default_path}")
+        except Exception as e:
+            logger.warning(f"Error auto-saving Notepad: {e}")
+
+    def cerrar_notepad_process(self):
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                if proc.info['name'] and proc.info['name'].lower() == "notepad.exe":
+                    proc.kill()
+        except Exception as e:
+            logger.warning(f"Error cerrando Notepad: {e}")
+
+    def update_notepad_live(self, new_text):
+        if not self.notepad_temp_file:
+            return
+        self.cerrar_notepad_process()
+        time.sleep(0.5)
+        try:
+            with open(self.notepad_temp_file, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+            subprocess.Popen(['notepad.exe', self.notepad_temp_file])
+        except Exception as e:
+            logger.warning(f"Error update_notepad_live: {e}")
+
+    def auto_save_notepad(self):
+        if not self.notepad_temp_file:
+            messagebox.showwarning("No se puede guardar", "No hay Notepad abierto.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Guardar Notepad",
+            defaultextension=".txt",
+            filetypes=[("Archivo de texto", "*.txt"), ("Todos los archivos", "*.*")]
+        )
+        if path:
+            try:
+                with open(self.notepad_temp_file, 'r', encoding='utf-8') as src:
+                    content = src.read()
+                with open(path, 'w', encoding='utf-8') as dst:
+                    dst.write(content)
+                messagebox.showinfo("Guardado", f"Notepad guardado en:\n{path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo guardar Notepad:\n{e}")
+
+    # ------------------ WORD ------------------
+    def create_word_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Microsoft Word")
+
+        lbl = tk.Label(tab, text="Texto para Word:", font=("Arial", 12))
+        lbl.pack(pady=5)
+
+        frame_txt = tk.Frame(tab)
+        frame_txt.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(frame_txt)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text_area = tk.Text(
+            frame_txt,
+            wrap=tk.WORD,
+            width=80,
+            height=20,
+            font=("Arial", 12),
+            yscrollcommand=scrollbar.set
+        )
+        text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_area.yview)
+
+        self.text_areas['word'] = text_area
+        text_area.bind('<KeyRelease>', lambda e: self.on_text_change(text_area))
+
+        btn_word = tk.Button(
+            tab,
+            text="Abrir Word",
+            command=lambda: self.abrir_word(text_area),
+            bg="#4CAF50",
+            fg="white",
+            font=("Arial", 12),
+            padx=20,
+            pady=10
+        )
+        btn_word.pack(pady=5)
+
+    def abrir_word(self, text_widget):
+        texto = text_widget.get("1.0", tk.END).strip()
+        try:
+            # Limpia la caché para evitar problemas
+            clear_win32com_cache()
+            
+            pythoncom.CoInitialize()
+            if not self.word_doc:
+                word = win32.Dispatch('Word.Application')
+                word.Visible = True
+                self.word_doc = word.Documents.Add()
+            self.word_doc.Content.Text = texto
+            self._auto_save_word_immediate()
+        except Exception as e:
+            logger.warning(f"Error abrir_word: {e}")
+            messagebox.showerror("Error al abrir Word", f"Hubo un problema: {str(e)}\nIntentando recuperar...")
+            try:
+                # Segundo intento después de limpiar caché
+                clear_win32com_cache()
+                pythoncom.CoInitialize()
+                word = win32.Dispatch('Word.Application')
+                word.Visible = True
+                self.word_doc = word.Documents.Add()
+                self.word_doc.Content.Text = texto
+                self._auto_save_word_immediate()
+            except Exception as e2:
+                logger.error(f"Error crítico en Word: {e2}")
+                messagebox.showerror("Error crítico", f"No se pudo iniciar Word: {str(e2)}")
+        finally:
+            pythoncom.CoUninitialize()
+
+    def _auto_save_word_immediate(self):
+        try:
+            if self.word_doc:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                default_path = os.path.join(os.getcwd(), f"auto_saved_word_{ts}.docx")
+                self.word_doc.SaveAs2(default_path)
+                logger.warning(f"[Auto-Saved Word] => {default_path}")
+        except Exception as e:
+            logger.warning(f"Error auto_save_word_immediate: {e}")
+
+    def update_word(self, texto):
+        try:
+            pythoncom.CoInitialize()
+            if self.word_doc:
+                self.word_doc.Content.Text = texto
+        except Exception as e:
+            logger.warning(f"Error update_word: {e}")
+        finally:
+            pythoncom.CoUninitialize()
+
+    def abrir_word_con_historia(self, texto):
+        try:
+            # Limpia la caché para evitar problemas
+            clear_win32com_cache()
+            
+            pythoncom.CoInitialize()
+            word = win32.Dispatch('Word.Application')
+            word.Visible = True
+            self.word_doc = word.Documents.Add()
+            self.word_doc.Content.Text = texto
+            self._auto_save_word_immediate()
+        except Exception as e:
+            logger.warning(f"Error abrir_word_con_historia: {e}")
+            messagebox.showerror("Error al abrir Word", f"Hubo un problema: {str(e)}\nIntentando recuperar...")
+            try:
+                # Segundo intento después de limpiar caché
+                clear_win32com_cache()
+                pythoncom.CoInitialize()
+                word = win32.Dispatch('Word.Application')
+                word.Visible = True
+                self.word_doc = word.Documents.Add()
+                self.word_doc.Content.Text = texto
+                self._auto_save_word_immediate()
+            except Exception as e2:
+                logger.error(f"Error crítico en Word: {e2}")
+                messagebox.showerror("Error crítico", f"No se pudo iniciar Word: {str(e2)}")
+        finally:
+            pythoncom.CoUninitialize()
+
+    def auto_save_word(self):
+        try:
+            pythoncom.CoInitialize()
+            if not self.word_doc:
+                messagebox.showwarning("Word no abierto", "No hay documento Word para guardar.")
+                return
+            path = filedialog.asksaveasfilename(
+                title="Guardar Word",
+                defaultextension=".docx",
+                filetypes=[("Documento Word", "*.docx"), ("Todos los archivos", "*.*")]
+            )
+            if path:
+                self.word_doc.SaveAs2(path)
+                messagebox.showinfo("Guardado", f"Documento Word guardado:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar Word:\n{e}")
+        finally:
+            pythoncom.CoUninitialize()
+
+    # ------------------ EXCEL ------------------
+    def create_excel_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Microsoft Excel")
+
+        lbl = tk.Label(tab, text="Texto para Excel (una línea por celda en Columna A):", font=("Arial", 12))
+        lbl.pack(pady=5)
+
+        frame_txt = tk.Frame(tab)
+        frame_txt.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(frame_txt)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text_area = tk.Text(
+            frame_txt,
+            wrap=tk.WORD,
+            width=70,
+            height=12,
+            font=("Arial", 12),
+            yscrollcommand=scrollbar.set
+        )
+        text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_area.yview)
+
+        self.text_areas['excel'] = text_area
+        text_area.bind('<KeyRelease>', lambda e: self.on_text_change(text_area))
+
+        btn_excel = tk.Button(
+            tab,
+            text="Abrir Excel",
+            command=lambda: self.abrir_excel(text_area),
+            bg="#FF9800",
+            fg="white",
+            font=("Arial", 12),
+            padx=20,
+            pady=10
+        )
+        btn_excel.pack(pady=5)
+
+        # Frame para fórmula
+        formula_frame = tk.LabelFrame(tab, text="Aplicar Fórmula en Excel")
+        formula_frame.pack(pady=5, padx=10, fill=tk.X)
+
+        lbl_cell = tk.Label(formula_frame, text="Celda (Ej: A1):", font=("Arial", 10))
+        lbl_cell.grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.excel_cell_entry = tk.Entry(formula_frame, width=10)
+        self.excel_cell_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        lbl_formula = tk.Label(formula_frame, text="Fórmula (Ej: =1+1):", font=("Arial", 10))
+        lbl_formula.grid(row=0, column=2, padx=5, pady=5, sticky="e")
+        self.excel_formula_entry = tk.Entry(formula_frame, width=20)
+        self.excel_formula_entry.grid(row=0, column=3, padx=5, pady=5)
+
+        btn_set_formula = tk.Button(
+            formula_frame,
+            text="Aplicar Fórmula",
+            command=self.aplicar_formula_excel,
+            bg="#3F51B5",
+            fg="white",
+            font=("Arial", 10),
+            padx=10,
+            pady=5
+        )
+        btn_set_formula.grid(row=0, column=4, padx=5, pady=5)
+
+    def abrir_excel(self, text_widget):
+        texto = text_widget.get("1.0", tk.END)
+        self.write_in_excel(texto)
+
+    def write_in_excel(self, texto):
+        lines = texto.split('\n')
+        for intento in range(3):  # Aumentamos el número de intentos
+            try:
+                # Limpia la caché en cada intento
+                if intento > 0:
+                    clear_win32com_cache()
+                
+                pythoncom.CoInitialize()
+                if not self.excel_app or not self.excel_sheet:
+                    # Usar Dispatch en lugar de gencache.EnsureDispatch para evitar problemas de caché
+                    self.excel_app = win32.Dispatch('Excel.Application')
+                    self.excel_app.Visible = True
+                    wb = self.excel_app.Workbooks.Add()
+                    self.excel_sheet = wb.Worksheets(1)
+
+                row = 1
+                for line in lines:
+                    if line.strip():  # Solo procesar líneas no vacías
+                        self.excel_sheet.Cells(row, 1).Value = line
+                        row += 1
+
+                self._auto_save_excel_immediate()
+                logger.info("Excel abierto y contenido escrito correctamente")
+                return
+            except pywintypes.com_error as e:
+                logger.warning(f"Error COM Excel (intento {intento+1}): {e}")
+                if self.excel_app:
+                    try:
+                        self.excel_app.Quit()
+                    except:
+                        pass
+                self.excel_app = None
+                self.excel_sheet = None
+                
+                # En el último intento, mostrar un mensaje de error
+                if intento == 2:
+                    logger.error(f"Error crítico en Excel después de 3 intentos: {e}")
+                    messagebox.showerror("Error con Excel", 
+                                        "No se pudo abrir Excel después de varios intentos.\n"
+                                        "Intente reiniciar la aplicación.")
+            except Exception as e:
+                logger.warning(f"Error general Excel (intento {intento+1}): {e}")
+                if intento == 2:
+                    logger.error(f"Error crítico general en Excel: {e}")
+                    messagebox.showerror("Error con Excel", f"Error general: {str(e)}")
+            finally:
+                pythoncom.CoUninitialize()
+
+    def _auto_save_excel_immediate(self):
+        try:
+            pythoncom.CoInitialize()
+            if self.excel_app and self.excel_sheet:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                default_path = os.path.join(os.getcwd(), f"auto_saved_excel_{ts}.xlsx")
+                wb = self.excel_app.ActiveWorkbook
+                wb.SaveAs(default_path)
+                logger.warning(f"[Auto-Saved Excel] => {default_path}")
+        except Exception as e:
+            logger.warning(f"Error auto_save_excel_immediate: {e}")
+        finally:
+            pythoncom.CoUninitialize()
+
+    def auto_save_excel(self):
+        try:
+            pythoncom.CoInitialize()
+            if not self.excel_app or not self.excel_sheet:
+                messagebox.showwarning("Excel no abierto", "No hay libro Excel para guardar.")
+                return
+            path = filedialog.asksaveasfilename(
+                title="Guardar Excel",
+                defaultextension=".xlsx",
+                filetypes=[("Libro Excel", "*.xlsx"), ("Todos los archivos", "*.*")]
+            )
+            if path:
+                wb = self.excel_app.ActiveWorkbook
+                wb.SaveAs(path)
+                messagebox.showinfo("Guardado", f"Libro Excel guardado:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar Excel:\n{e}")
+        finally:
+            pythoncom.CoUninitialize()
+
+    def aplicar_formula_excel(self):
+        if not self.excel_app or not self.excel_sheet:
+            messagebox.showwarning("Excel no abierto", "Primero abre Excel antes de aplicar fórmula.")
+            return
+        cell_str = self.excel_cell_entry.get().strip()
+        formula_str = self.excel_formula_entry.get().strip()
+        if not cell_str or not formula_str:
+            messagebox.showwarning("Campos vacíos", "Indica celda y fórmula.")
+            return
+        try:
+            pythoncom.CoInitialize()
+            wb = self.excel_app.ActiveWorkbook
+            sht = wb.ActiveSheet
+            sht.Range(cell_str).Formula = formula_str
+            messagebox.showinfo("Fórmula aplicada", f"Celda {cell_str} = {formula_str}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo aplicar la fórmula:\n{e}")
+        finally:
+            pythoncom.CoUninitialize()
+
+    # ------------------- BROWSERS (CHROME / FIREFOX) -------------------
+    def create_firefox_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Buscar en Firefox")
+
+        lbl = tk.Label(tab, text="Texto para Firefox (búsqueda):", font=("Arial", 12))
+        lbl.pack(pady=5)
+
+        frame_txt = tk.Frame(tab)
+        frame_txt.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(frame_txt)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text_area = tk.Text(
+            frame_txt, wrap=tk.WORD, width=80, height=10,
+            font=("Arial", 12),
+            yscrollcommand=scrollbar.set
+        )
+        text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_area.yview)
+
+        self.text_areas['firefox'] = text_area
+        text_area.bind('<KeyRelease>', lambda e: self.on_text_change(text_area))
+
+        btn_ff = tk.Button(
+            tab,
+            text="Abrir/Búsqueda en Firefox",
+            command=lambda: self.abrir_firefox(text_area),
+            bg="#FF7139",
+            fg="white",
+            font=("Arial", 12),
+            padx=20,
+            pady=10
+        )
+        btn_ff.pack(pady=5)
+
+    def create_chrome_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Buscar en Chrome")
+
+        lbl = tk.Label(tab, text="Texto para Chrome (búsqueda):", font=("Arial", 12))
+        lbl.pack(pady=5)
+
+        frame_txt = tk.Frame(tab)
+        frame_txt.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(frame_txt)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text_area = tk.Text(
+            frame_txt, wrap=tk.WORD, width=80, height=10,
+            font=("Arial", 12),
+            yscrollcommand=scrollbar.set
+        )
+        text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_area.yview)
+
+        self.text_areas['chrome'] = text_area
+        text_area.bind('<KeyRelease>', lambda e: self.on_text_change(text_area))
+
+        btn_chrome = tk.Button(
+            tab,
+            text="Abrir/Búsqueda en Chrome",
+            command=lambda: self.abrir_chrome(text_area),
+            bg="#4285F4",
+            fg="white",
+            font=("Arial", 12),
+            padx=20,
+            pady=10
+        )
+        btn_chrome.pack(pady=5)
+
+    def abrir_firefox(self, text_widget):
+        texto = text_widget.get("1.0", tk.END).strip()
+        try:
+            if not self.firefox_driver:
+                service = FirefoxService(executable_path=GeckoDriverManager().install())
+                options = webdriver.FirefoxOptions()
+                options.add_argument("--start-maximized")
+                self.firefox_driver = webdriver.Firefox(service=service, options=options)
+            self.update_browsers('firefox', texto, "Todo")
+        except Exception as e:
+            logger.warning(f"Error abrir_firefox: {e}")
+
+    def abrir_chrome(self, text_widget):
+        texto = text_widget.get("1.0", tk.END).strip()
+        try:
+            if not self.chrome_driver:
+                service = ChromeService(executable_path=ChromeDriverManager().install())
+                options = webdriver.ChromeOptions()
+                options.add_argument("--start-maximized")
+                options.add_experimental_option('excludeSwitches', ['enable-logging'])
+                self.chrome_driver = webdriver.Chrome(service=service, options=options)
+            threading.Thread(
+                target=self.update_browsers,
+                args=('chrome', texto, "Todo"),
+                daemon=True
+            ).start()
+        except Exception as e:
+            logger.warning(f"Error abrir_chrome: {e}")
+
+    def abrir_chrome_fake(self, raw_search):
+        try:
+            if not self.chrome_driver:
+                service = ChromeService(executable_path=ChromeDriverManager().install())
+                options = webdriver.ChromeOptions()
+                options.add_argument("--start-maximized")
+                options.add_experimental_option('excludeSwitches', ['enable-logging'])
+                self.chrome_driver = webdriver.Chrome(service=service, options=options)
+            self.update_browsers('chrome', raw_search, "Todo")
+        except Exception as e:
+            logger.warning(f"Error abrir_chrome_fake: {e}")
+
+    def abrir_firefox_fake(self, raw_search):
+        try:
+            if not self.firefox_driver:
+                service = FirefoxService(executable_path=GeckoDriverManager().install())
+                options = webdriver.FirefoxOptions()
+                options.add_argument("--start-maximized")
+                self.firefox_driver = webdriver.Firefox(service=service, options=options)
+            self.update_browsers('firefox', raw_search, "Todo")
+        except Exception as e:
+            logger.warning(f"Error abrir_firefox_fake: {e}")
+
+    def update_browsers(self, browser_key, texto, default_section):
+        """
+        Corrige "en hoteles para perritos" => "hoteles para perritos"
+        Mismo con "en maps", etc.
+        """
+        ltxt = texto.lower()
+
+        # 1) Revisar si "maps"
+        # Si el usuario dice "en maps", lo removemos
+        # por ejemplo: "busca en maps hoteles para perritos" => subject = "hoteles para perritos"
+        if "map" in ltxt:
+            # remover "en maps" o "maps" en la parte sobrante
+            # para no generarle "en++"
+            parted = ltxt.split("maps", maxsplit=1)
+            # parted[-1], remove leading "en "
+            subject = parted[-1].strip()
+            if subject.startswith("en "):
+                subject = subject[3:].strip()
+            # apply normal removal logic
+            #  (handled below with remove_phrases if needed)
+            # then do google maps search
+            # we return after building the url
+            # but let's keep the standard logic for partial synergy
+            # so we reassign ltxt to some placeholder
+            ltxt = "maps " + subject
+
+        # 2) Revisar "spotify"
+        if "spotify" in ltxt:
+            # placeholder => open "https://open.spotify.com/"
+            try:
+                url = "https://open.spotify.com/"
+                if browser_key == 'firefox' and self.firefox_driver:
+                    self.firefox_driver.get(url)
+                elif browser_key == 'chrome' and self.chrome_driver:
+                    self.chrome_driver.get(url)
+                return
+            except Exception as e:
+                logger.warning(f"Error abrir Spotify: {e}")
+                return
+
+        # 3) videos en youtube
+        if "video" in ltxt and "youtube" in ltxt:
+            parted = ltxt.split("youtube", maxsplit=1)
+            subject = parted[-1].strip()
+            if subject.startswith("de "):
+                subject = subject[3:].strip()
+            for rp in ["videos en", "videos", "video en", "video", "de"]:
+                idx = subject.find(rp)
+                if idx != -1:
+                    subject = subject[:idx] + subject[idx+len(rp):]
+            subject = subject.strip()
+            if not subject:
+                subject = "videos"
+
+            q = urllib.parse.quote_plus(subject)
+            url = f"https://www.youtube.com/results?search_query={q}"
+            try:
+                if browser_key == 'firefox' and self.firefox_driver:
+                    self.firefox_driver.get(url)
+                elif browser_key == 'chrome' and self.chrome_driver:
+                    self.chrome_driver.get(url)
+            except Exception as e:
+                logger.warning(f"Error youtube: {e}")
+            return
+
+        # 4) videos en vimeo
+        if "video" in ltxt and "vimeo" in ltxt:
+            parted = ltxt.split("vimeo", maxsplit=1)
+            subject = parted[-1].strip()
+            if subject.startswith("de "):
+                subject = subject[3:].strip()
+            for rp in ["videos en", "videos", "video en", "video", "de"]:
+                idx = subject.find(rp)
+                if idx != -1:
+                    subject = subject[:idx] + subject[idx+len(rp):]
+            subject = subject.strip()
+            if not subject:
+                subject = "videos"
+            q = urllib.parse.quote_plus(subject)
+            url = f"https://vimeo.com/search?q={q}"
+            try:
+                if browser_key == 'firefox' and self.firefox_driver:
+                    self.firefox_driver.get(url)
+                elif browser_key == 'chrome' and self.chrome_driver:
+                    self.chrome_driver.get(url)
+            except Exception as e:
+                logger.warning(f"Error vimeo: {e}")
+            return
+
+        # 5) Secciones normales
+        sec = default_section
+        if "imagen" in ltxt or "foto" in ltxt:
+            sec = "Imágenes"
+        elif "video" in ltxt:
+            sec = "Videos"
+        elif "map" in ltxt:
+            sec = "Maps"
+        elif "noticia" in ltxt:
+            sec = "Noticias"
+        elif "shopping" in ltxt or "comprar" in ltxt:
+            sec = "Shopping"
+        elif "libro" in ltxt:
+            sec = "Libros"
+
+        remove_phrases = [
+            "fotos de", "fotos", "imagenes de", "imágenes de", "imágenes",
+            "videos de", "videos", "video de", "video", "videos en", "video en",
+            "noticias de", "noticia de", "noticias", "noticia",
+            "maps de", "map de", "maps", "map",
+            "shopping de", "shopping", "comprar",
+            "libros de", "libro de", "libros", "libro"
+        ]
+        subject = texto
+        for rp in remove_phrases:
+            idx = subject.lower().find(rp)
+            if idx != -1:
+                subject = subject[:idx] + subject[idx+len(rp):]
+        subject = subject.strip()
+        if subject.startswith("en "):
+            subject = subject[3:].strip()
+        if not subject:
+            subject = texto
+
+        section_map = {
+            "Todo":     "",
+            "Imágenes": "isch",
+            "Videos":   "vid",
+            "Maps":     "maps",
+            "Noticias": "nws",
+            "Shopping": "shop",
+            "Libros":   "bks"
+        }
+
+        query = urllib.parse.quote_plus(subject)
+        if sec == "Maps":
+            url = f"https://www.google.com/maps/search/?api=1&query={query}"
+        else:
+            tbm = section_map.get(sec, "")
+            if tbm:
+                url = f"https://www.google.com/search?q={query}&tbm={tbm}"
+            else:
+                url = f"https://www.google.com/search?q={query}"
+
+        try:
+            if browser_key == 'firefox' and self.firefox_driver:
+                self.firefox_driver.get(url)
+            elif browser_key == 'chrome' and self.chrome_driver:
+                self.chrome_driver.get(url)
+        except Exception as e:
+            logger.warning(f"Error update_browsers: {e}")
+
+    # -------------- Placeholders Redes Sociales --------------
+    def login_social_media(self, platform, user, password):
+        pass
+
+    def post_social_media(self, platform, text, media_path=None):
+        pass
+    
+    # ----------------- NUEVAS PESTAÑAS (MULTIMEDIA) -----------------
+    def create_downloader_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Descargar Música/Videos")
+        
+        # Crear instancia del descargador dentro de esta pestaña
+        self.downloader = VideoDownloaderFrame(tab)
+        self.downloader.pack(fill=tk.BOTH, expand=True)
+    
+    def create_media_player_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Reproductor Multimedia")
+        
+        # Crear instancia del reproductor multimedia dentro de esta pestaña
+        self.media_player = MediaPlayerFrame(tab)
+        self.media_player.pack(fill=tk.BOTH, expand=True)
+
+    # -------------- TEXT CHANGE / CERRAR ---------------------
+    def on_text_change(self, text_widget):
+        cur_time = time.time() * 1000
+        if cur_time - self.last_update >= self.update_delay:
+            self.last_update = cur_time
+            texto = text_widget.get("1.0", tk.END)
+            for k, area in self.text_areas.items():
+                if text_widget == area:
+                    if k == 'word' and self.word_doc:
+                        self.update_word(texto)
+                    elif k == 'excel' and self.excel_sheet:
+                        self.write_in_excel(texto)
+                    elif k == 'notepad' and self.notepad_live_sync:
+                        threading.Thread(
+                            target=self.update_notepad_live,
+                            args=(texto,),
+                            daemon=True
+                        ).start()
+                    elif k == 'firefox' and self.firefox_driver:
+                        threading.Thread(
+                            target=self.update_browsers,
+                            args=('firefox', texto, "Todo"),
+                            daemon=True
+                        ).start()
+                    elif k == 'chrome' and self.chrome_driver:
+                        threading.Thread(
+                            target=self.update_browsers,
+                            args=('chrome', texto, "Todo"),
+                            daemon=True
+                        ).start()
+
+    def cerrar_aplicacion(self):
+        try:
+            pythoncom.CoInitialize()
+            if self.word_doc:
+                self.word_doc.Application.Quit()
+                self.word_doc = None
+            if self.excel_app:
+                self.excel_app.Quit()
+                self.excel_app = None
+                self.excel_sheet = None
+        except:
+            pass
+        finally:
+            pythoncom.CoUninitialize()
+
+        if self.chrome_driver:
+            self.chrome_driver.quit()
+            self.chrome_driver = None
+        if self.firefox_driver:
+            self.firefox_driver.quit()
+            self.firefox_driver = None
+
+        # Detener reproducción de media si está activa
+        if pygame_available:
+            try:
+                pygame.mixer.quit()
+                pygame.quit()
+            except:
+                pass
+        
+        self.cerrar_notepad_process()
+        self.root.destroy()
+        sys.exit()
+
+    def main(self):
+        self.root.mainloop()
+    
+    # ------------------- FUNCIONES MULTIMEDIA -------------------
+    def download_media(self, url, is_audio=False, format_type="mp4"):
+        """Método para iniciar descargas desde el chatbot"""
+        # Usamos la función directa en lugar de la interfaz gráfica
+        if self.downloader:
+            self.notebook.select(self.notebook.index("Descargar Música/Videos"))
+        
+        logger.info(f"Solicitud de descarga desde chatbot: {url}, audio={is_audio}, formato={format_type}")
+        return direct_download_media(url, is_audio, format_type)
+    
+    def play_media(self, filename):
+        """Método para reproducir archivos multimedia desde el chatbot"""
+        if self.media_player:
+            success = self.media_player.play_file_by_name(filename)
+            if success:
+                self.notebook.select(self.notebook.index("Reproductor Multimedia"))
+                return True, f"Reproduciendo {filename}"
+            else:
+                self.media_player.refresh_from_downloads()
+                # Intentar de nuevo después de actualizar
+                success = self.media_player.play_file_by_name(filename)
+                if success:
+                    self.notebook.select(self.notebook.index("Reproductor Multimedia"))
+                    return True, f"Reproduciendo {filename}"
+            return False, f"No se encontró {filename} en la lista de reproducción"
+        return False, "Reproductor multimedia no inicializado"
+    
+    def stop_media(self):
+        """Detiene la reproducción actual"""
+        if self.media_player:
+            self.media_player.stop()
+            return True, "Reproducción detenida"
+        return False, "Reproductor multimedia no inicializado"
+
+###############################################################################
+#                           LM STUDIO + TEST TIME
+###############################################################################
+client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
+
+def speak_text_azure(text, voice_gender):
+    pass
+
+def transcribe_audio():
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Escuchando... Habla ahora")
+        audio = r.listen(source)
+    try:
+        texto = r.recognize_google(audio, language='es-ES')
+        print(f"Has dicho: {texto}")
+        return texto
+    except:
+        print("No pude entender lo que dijiste")
+        return "No pude entender el audio."
+
+def build_conversation_history(messages):
+    hist = []
+    for m in messages:
+        if m["role"] == "user":
+            hist.append(f"Usuario: {m['content']}")
+        elif m["role"] == "assistant":
+            hist.append(f"Asistente: {m['content']}")
+    return "\n".join(hist)
+
+def dummy_reward_function(text):
+    return len(text)
+
+def strategy_simple(context, user_message, depth, model, temperature, full_messages=None):
+    if full_messages is not None:
+        c_hist = build_conversation_history(full_messages)
+        context = f"{context}\n\nHistorial:\n{c_hist}"
+
+    prompt = f"""
+Eres un asistente experto en multimedia.
+Usuario: "{user_message}"
+Genera un razonamiento interno con {depth} pasos.
+Luego di "Respuesta Final:" con tu respuesta final.
+"""
+    msgs_for_api = [
+        {"role": "system", "content": context},
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": user_message}
+    ]
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=msgs_for_api,
+            temperature=temperature
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error en comunicación con el modelo: {str(e)}"
+
+def strategy_best_of_n(context, user_message, n, model, temperature, full_messages=None):
+    return "Not Implemented"
+
+def strategy_weighted_best_of_n(context, user_message, n, model, temperature, full_messages=None):
+    return "Not Implemented"
+
+def strategy_beam_search(context, user_message, beam_iterations, model, temperature, full_messages=None):
+    return "Not Implemented"
+
+def strategy_dvts(context, user_message, total_subtrees, model, temperature, full_messages=None):
+    return "DVTS placeholder"
+
+
+###############################################################################
+#                   PARSEO DE COMANDOS (AMPLIADO CON MULTIMEDIA)
+###############################################################################
+launcher = None
+
+def get_system_time():
+    now = datetime.datetime.now()
+    return now.strftime("%Y-%m-%d %H:%M:%S")
+
+def parse_and_execute_command(
+    user_text,
+    context,
+    messages,
+    strategy,
+    test_time_compute,
+    model,
+    temperature
+):
+    lt = user_text.lower()
+    
+    # Registrar el comando para debugging
+    logger.info(f"Analizando comando: {user_text}")
+
+    # Comandos para descargar música/videos - PATRONES MEJORADOS
+    download_video_patterns = [
+        r"descarga(?:\w)?\s+(?:el\s+)?video\s+de\s+(https?://\S+)",
+        r"descarga(?:\w)?\s+(?:el\s+)?video\s+(https?://\S+)",
+        r"baja(?:\w)?\s+(?:el\s+)?video\s+de\s+(https?://\S+)",
+        r"baja(?:\w)?\s+(?:el\s+)?video\s+(https?://\S+)",
+        r"(?:quiero|necesito)\s+(?:descargar|bajar)\s+(?:el\s+)?video\s+(?:de\s+)?(https?://\S+)"
+    ]
+    
+    download_audio_patterns = [
+        r"descarga(?:\w)?\s+(?:el\s+)?audio\s+de\s+(https?://\S+)",
+        r"descarga(?:\w)?\s+(?:la\s+)?música\s+de\s+(https?://\S+)",
+        r"descarga(?:\w)?\s+(?:la\s+)?canción\s+de\s+(https?://\S+)",
+        r"baja(?:\w)?\s+(?:el\s+)?audio\s+de\s+(https?://\S+)",
+        r"baja(?:\w)?\s+(?:la\s+)?música\s+de\s+(https?://\S+)",
+        r"baja(?:\w)?\s+(?:la\s+)?canción\s+de\s+(https?://\S+)",
+        r"(?:quiero|necesito)\s+(?:descargar|bajar)\s+(?:el\s+audio|la\s+música|la\s+canción)\s+(?:de\s+)?(https?://\S+)"
+    ]
+    
+    # Verificar patrones de descarga de video
+    for pattern in download_video_patterns:
+        match = re.search(pattern, user_text, re.IGNORECASE)  # Usar el texto original con case insensitive
+        if match:
+            url_part = match.group(1)
+            # Extraer la URL completa, incluyendo parámetros
+            url_match = re.search(r'(https?://\S+)', url_part)
+            if url_match:
+                url = url_match.group(1)
+                logger.info(f"URL de video detectada: {url}")
+                print(f"\n[COMANDO] Descargando video: {url}")
+                success, message = direct_download_media(url, False, "mp4")
+                return True, message
+    
+    # Verificar patrones de descarga de audio
+    for pattern in download_audio_patterns:
+        match = re.search(pattern, user_text, re.IGNORECASE)  # Usar el texto original con case insensitive
+        if match:
+            url_part = match.group(1)
+            # Extraer la URL completa, incluyendo parámetros
+            url_match = re.search(r'(https?://\S+)', url_part)
+            if url_match:
+                url = url_match.group(1)
+                logger.info(f"URL de audio detectada: {url}")
+                print(f"\n[COMANDO] Descargando audio: {url}")
+                success, message = direct_download_media(url, True, "mp3")
+                return True, message
+    
+    # Si llegamos hasta aquí, la URL podría estar sin "https://" al principio
+    youtube_url_patterns = [
+        r"descarga(?:\w)?\s+(?:el\s+)?video\s+(?:de\s+)?(youtu\.be\/\S+)",
+        r"descarga(?:\w)?\s+(?:el\s+)?video\s+(?:de\s+)?(youtube\.com\/\S+)",
+        r"descarga(?:\w)?\s+(?:la\s+)?música\s+(?:de\s+)?(youtu\.be\/\S+)",
+        r"descarga(?:\w)?\s+(?:la\s+)?música\s+(?:de\s+)?(youtube\.com\/\S+)"
+    ]
+    
+    for pattern in youtube_url_patterns:
+        match = re.search(pattern, user_text, re.IGNORECASE)
+        if match:
+            partial_url = match.group(1)
+            # Añadir el esquema https:// si falta
+            if not partial_url.startswith('http'):
+                url = f"https://{partial_url}"
+            else:
+                url = partial_url
+                
+            logger.info(f"URL de YouTube corregida: {url}")
+            print(f"\n[COMANDO] Detectada URL de YouTube sin protocolo: {url}")
+            
+            # Determinar si es video o audio basado en el texto completo
+            is_audio = "música" in lt or "audio" in lt or "canción" in lt
+            success, message = direct_download_media(url, is_audio, "mp3" if is_audio else "mp4")
+            return True, message
+    
+    # Reproducir música o video descargados
+    play_media_patterns = [
+        r"reproduc(?:\w+)\s+(?:el\s+archivo|el\s+video|la\s+música|la\s+canción|el|la)\s+(.+)",
+        r"pon(?:er|ga|me)?\s+(?:el\s+archivo|el\s+video|la\s+música|la\s+canción|el|la)\s+(.+)",
+        r"escucha(?:\w+)\s+(?:el\s+archivo|el\s+video|la\s+música|la\s+canción|el|la)\s+(.+)"
+    ]
+    
+    # Detener reproducción
+    stop_media_patterns = [
+        r"detén la reproducción",
+        r"para la reproducción",
+        r"detener música",
+        r"parar música",
+        r"detener video",
+        r"parar video",
+        r"stop"
+    ]
+    
+    # Verificar patrones de reproducción
+    for pattern in play_media_patterns:
+        match = re.search(pattern, lt)
+        if match:
+            filename = match.group(1).strip()
+            logger.info(f"Intentando reproducir: {filename}")
+            success, message = launcher.play_media(filename)
+            return True, message
+    
+    # Verificar patrones para detener reproducción
+    for pattern in stop_media_patterns:
+        if re.search(pattern, lt):
+            logger.info("Comando para detener reproducción detectado")
+            success, message = launcher.stop_media()
+            return True, message
+
+    # Manejo de "abre spotify" (chrome/firefox) => open "https://open.spotify.com/"
+    if "abre spotify" in lt:
+        if "chrome" in lt:
+            if not launcher.chrome_driver:
+                launcher.abrir_chrome_fake("spotify")
+                return True, "Abriendo Chrome y Spotify"
+            else:
+                launcher.update_browsers('chrome', "spotify", "Todo")
+                return True, "Spotify en Chrome"
+        elif "firefox" in lt:
+            if not launcher.firefox_driver:
+                launcher.abrir_firefox_fake("spotify")
+                return True, "Abriendo Firefox y Spotify"
+            else:
+                launcher.update_browsers('firefox', "spotify", "Todo")
+                return True, "Spotify en Firefox"
+        else:
+            # default
+            if not launcher.chrome_driver:
+                launcher.abrir_chrome_fake("spotify")
+                return True, "Abriendo Chrome y Spotify"
+            else:
+                launcher.update_browsers('chrome', "spotify", "Todo")
+                return True, "Spotify en Chrome"
+
+    if "abre la red social" in lt and ("usuario" in lt or "contraseña" in lt):
+        return True, "Placeholder: abriendo red social"
+
+    # Hora/fecha
+    if "qué hora" in lt or "que hora" in lt:
+        return True, f"La hora local es: {get_system_time()}"
+    if "qué fecha" in lt or "que fecha" in lt:
+        return True, f"La fecha/hora local es: {get_system_time()}"
+
+    # Notepad synonyms
+    synonyms_notepad = ["notepad", "bloc de notas", "block de notas"]
+    if ("abre" in lt and any(syn in lt for syn in synonyms_notepad) and "escribe" in lt):
+        ans = handle_app_llm(user_text, context, messages, strategy, test_time_compute, model, temperature, "notepad")
+        return True, ans
+
+    # Word
+    if "abre" in lt and "word" in lt and "escribe" in lt:
+        ans = handle_app_llm(user_text, context, messages, strategy, test_time_compute, model, temperature, "word")
+        return True, ans
+
+    # Excel
+    if "abre" in lt and "excel" in lt and "escribe" in lt:
+        ans = handle_app_llm(user_text, context, messages, strategy, test_time_compute, model, temperature, "excel")
+        return True, ans
+
+    # busqueda en chrome/firefox
+    if "busca" in lt:
+        browser = None
+        if "chrome" in lt:
+            browser = "chrome"
+        elif "firefox" in lt:
+            browser = "firefox"
+
+        parted = lt.split("busca", maxsplit=1)
+        raw_search = parted[1].strip() if len(parted) > 1 else "búsqueda"
+
+        if browser == "chrome":
+            if not launcher.chrome_driver:
+                launcher.abrir_chrome_fake(raw_search)
+                return True, f"**Abriendo Chrome** y buscando: {raw_search}"
+            else:
+                launcher.update_browsers('chrome', raw_search, "Todo")
+                return True, f"**Usando Chrome abierto** para buscar: {raw_search}"
+        elif browser == "firefox":
+            if not launcher.firefox_driver:
+                launcher.abrir_firefox_fake(raw_search)
+                return True, f"**Abriendo Firefox** y buscando: {raw_search}"
+            else:
+                launcher.update_browsers('firefox', raw_search, "Todo")
+                return True, f"**Usando Firefox abierto** para buscar: {raw_search}"
+
+    # Si llegamos aquí, no se encontró un comando válido
+    logger.info("No se encontró un comando válido para ejecutar")
+    return False, ""
+
+def handle_app_llm(user_text, context, messages, strategy, test_time_compute, model, temperature, app):
+    parted = user_text.split("escribe", maxsplit=1)
+    user_msg = parted[1].strip() if len(parted) > 1 else "Texto de ejemplo..."
+
+    conv_hist = build_conversation_history(messages)
+    ext_ctx = f"{context}\n\nHistorial:\n{conv_hist}"
+
+    if strategy == "Simple":
+        raw_resp = strategy_simple(
+            context=ext_ctx,
+            user_message=user_msg,
+            depth=test_time_compute,
+            model=model,
+            temperature=temperature,
+            full_messages=messages
+        )
+    elif strategy == "DVTS":
+        raw_resp = strategy_dvts(
+            context=ext_ctx,
+            user_message=user_msg,
+            total_subtrees=test_time_compute,
+            model=model,
+            temperature=temperature,
+            full_messages=messages
+        )
+    else:
+        raw_resp = "Strategy placeholder..."
+
+    final_resp = raw_resp.replace("Respuesta Final:", "").strip()
+
+    if app == "word":
+        clear_win32com_cache()  # Limpiar caché antes de usar Word
+        launcher.abrir_word_con_historia(final_resp)
+        return f"**He escrito en Word**:\n{final_resp}"
+    elif app == "excel":
+        clear_win32com_cache()  # Limpiar caché antes de usar Excel
+        launcher.write_in_excel(final_resp)
+        return f"**He escrito en Excel**:\n{final_resp}"
+    elif app == "notepad":
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode='w', encoding='utf-8') as tmp:
+            tmp.write(final_resp)
+            path = tmp.name
+        subprocess.Popen(['notepad.exe', path])
+
+        # Autoguardado Notepad
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_notepad_path = os.path.join(os.getcwd(), f"auto_saved_notepad_{ts}.txt")
+        try:
+            with open(path, 'r', encoding='utf-8') as src:
+                data = src.read()
+            with open(default_notepad_path, 'w', encoding='utf-8') as dst:
+                dst.write(data)
+            logger.warning(f"[Auto-Saved Notepad] => {default_notepad_path}")
+        except Exception as e:
+            logger.warning(f"Error auto-saving notepad: {e}")
+
+        return f"**He escrito en Notepad**:\n{final_resp}"
+
+    return f"Acción en {app.upper()}: {final_resp}"
+
+
+###############################################################################
+#                          send_message
+###############################################################################
+def send_message(
+    user_message,
+    chat_history,
+    messages,
+    context,
+    user_name,
+    bot_name,
+    temperature,
+    model,
+    use_voice,
+    voice_gender,
+    strategy,
+    test_time_compute
+):
+    if messages is None:
+        return "Primero inicia el chatbot", chat_history, messages
+    
+    logger.info(f"Mensaje recibido: '{user_message}'")
+
+    # Intenta ejecutar un comando (descarga, reproducción, etc)
+    executed, result = parse_and_execute_command(
+        user_text=user_message,
+        context=context,
+        messages=messages,
+        strategy=strategy,
+        test_time_compute=test_time_compute,
+        model=model,
+        temperature=temperature
+    )
+    
+    # Si se ejecutó un comando, registra y responde
+    if executed:
+        logger.info(f"Comando ejecutado: '{user_message}' con resultado: {result}")
+        
+        messages.append({"role": "user", "content": f"{user_name}: {user_message}"})
+        messages.append({"role": "assistant", "content": result})
+
+        chat_history.append({"role": "user", "content": f"{user_name}: {user_message}"})
+        chat_history.append({"role": "assistant", "content": f"{bot_name}: {result}"})
+        return "", chat_history, messages
+
+    # Si no se ejecutó ningún comando, usa el modelo para generar una respuesta
+    logger.info(f"No se ejecutó comando, enviando a modelo: '{user_message}'")
+    
+    conversation_str = build_conversation_history(messages)
+    ext_ctx = f"{context}\n\n{conversation_str}"
+
+    if strategy == "Simple":
+        resp = strategy_simple(
+            context=ext_ctx,
+            user_message=user_message,
+            depth=test_time_compute,
+            model=model,
+            temperature=temperature,
+            full_messages=messages
+        )
+    elif strategy == "DVTS":
+        resp = strategy_dvts(
+            context=ext_ctx,
+            user_message=user_message,
+            total_subtrees=test_time_compute,
+            model=model,
+            temperature=temperature,
+            full_messages=messages
+        )
+    else:
+        resp = "Strategy no implementada."
+
+    messages.append({"role": "user", "content": f"{user_name}: {user_message}"})
+    messages.append({"role": "assistant", "content": resp})
+
+    chat_history.append({"role": "user", "content": f"{user_name}: {user_message}"})
+    chat_history.append({"role": "assistant", "content": f"{bot_name}: {resp}"})
+
+    return "", chat_history, messages
+
+def clear_history():
+    return [], [], "", "", "", "", 0.5, "meta-llama-3.1-8b-instruct", False, "Femenina", "Simple", 1
+
+def start_chatbot(context, user, bot, temperature, model, voice_gender, strategy, test_time_compute):
+    msgs = [
+        {"role": "system", "content": context},
+        {"role": "assistant", "content": f"¡Hola {user}! Soy {bot}. ¿En qué puedo ayudarte hoy?"}
+    ]
+    ch = [{"role": "assistant", "content": msgs[-1]['content']}]
+    return (
+        ch, msgs, context, user, bot, temperature, model, voice_gender, strategy, test_time_compute,
+        gr.update(interactive=True)
+    )
+
+###############################################################################
+#                               run_all
+###############################################################################
+def run_all():
+    global launcher
+    logger.info("Iniciando TRON ARES")
+    
+    # Mensaje de inicio en la consola
+    print("=" * 80)
+    print("        TRON ARES by Viaja Tech")
+    print("=" * 80)
+    print(" - Soporte para descargas de videos y música de YouTube y otras plataformas")
+    print(" - Reproductor multimedia integrado")
+    print(" - Integración con aplicaciones Office y navegadores")
+    print("=" * 80)
+    
+    # Limpiamos la caché al inicio para evitar problemas
+    clear_win32com_cache()
+    
+    root_tk = tk.Tk()
+    launcher = MultiAppLauncher(root_tk)
+
+    with gr.Blocks(title="TRON ARES by Viaja Tech") as demo:
+        gr.Markdown("# TRON ARES by Viaja Tech")
+        
+        with gr.Accordion("Ayuda y Comandos", open=False):
+            gr.Markdown("""
+            ## Comandos Disponibles
+            
+            ### Descargar Multimedia
+            - "Descarga el video de [URL]" - Descarga video de YouTube o plataformas compatibles
+            - "Descarga la música de [URL]" - Descarga audio de YouTube o plataformas compatibles
+            
+            ### Reproducción
+            - "Reproduce [nombre del archivo]" - Reproduce un archivo de la biblioteca
+            - "Detén la reproducción" - Detiene la reproducción actual
+            
+            ### Navegadores
+            - "Busca en Chrome/Firefox [término]" - Realiza búsquedas
+            - "Abre Spotify" - Abre Spotify en el navegador
+            
+            ### Aplicaciones Office
+            - "Abre Word y escribe [texto]" - Abre Word y escribe el texto generado
+            - "Abre Excel y escribe [contenido]" - Abre Excel con el contenido en columnas
+            - "Abre Notepad y escribe [texto]" - Abre Notepad con el texto generado
+            """)
+
+        with gr.Tab("Configuración"):
+            context_in = gr.Textbox(
+                label="Contexto inicial",
+                lines=3,
+                value="Eres un potente asistente multimedia. Eres extremadamente capaz para ayudar con la descarga y reproducción de música y videos de YouTube y otras plataformas. También puedes abrir aplicaciones, realizar búsquedas en internet y mucho más."
+            )
+            user_in = gr.Textbox(label="Tu nombre", value="Usuario")
+            bot_in = gr.Textbox(label="Nombre del Chatbot", value="ARES")
+
+            temperature_in = gr.Slider(
+                label="Temperatura",
+                minimum=0.0,
+                maximum=1.0,
+                value=0.7,
+                step=0.1
+            )
+            model_in = gr.Textbox(
+                label="Modelo (LM Studio)",
+                value="meta-llama-3.1-8b-instruct"
+            )
+
+            use_voice_in = gr.Checkbox(label="Activar salida de voz", value=False)
+            voice_gender_in = gr.Radio(
+                label="Voz del chatbot",
+                choices=["Femenina", "Masculina"],
+                value="Femenina"
+            )
+
+            strategy_in = gr.Radio(
+                label="Estrategia Test-time Compute",
+                choices=["Simple", "Best-of-N", "Weighted Best-of-N", "Beam Search", "DVTS"],
+                value="Simple"
+            )
+            test_time_in = gr.Number(
+                label="Test-time Compute (1..1000)",
+                value=1,
+                precision=0
+            )
+
+            start_button = gr.Button("Iniciar Chatbot")
+
+        with gr.Tab("Chat"):
+            chat_history = gr.Chatbot(type="messages")
+            with gr.Row():
+                message_input = gr.Textbox(label="Escribe tu mensaje...")
+                send_button = gr.Button("Enviar", interactive=False)
+            voice_input_button = gr.Button("Hablar")
+            clear_button = gr.Button("Borrar historial")
+
+        # States
+        st_messages = gr.State()
+        st_context = gr.State()
+        st_user = gr.State()
+        st_bot = gr.State()
+        st_temp = gr.State()
+        st_model = gr.State()
+        st_voice_gender = gr.State()
+        st_strategy = gr.State()
+        st_test_time = gr.State()
+
+        def on_start_btn(cx, us, bo, tmp, mdl, vg, stg, tti):
+            if not isinstance(tti, int):
+                tti = int(tti)
+            if tti < 1:
+                tti = 1
+            if tti > 1000:
+                tti = 1000
+
+            ch, msgs, c, u, b, te, mo, vo, st, tt, upd = start_chatbot(
+                cx, us, bo, tmp, mdl, vg, stg, tti
+            )
+            return ch, msgs, c, u, b, te, mo, vo, st, tt, upd
+
+        start_button.click(
+            on_start_btn,
+            inputs=[
+                context_in,
+                user_in,
+                bot_in,
+                temperature_in,
+                model_in,
+                voice_gender_in,
+                strategy_in,
+                test_time_in
+            ],
+            outputs=[
+                chat_history,
+                st_messages,
+                st_context,
+                st_user,
+                st_bot,
+                st_temp,
+                st_model,
+                st_voice_gender,
+                st_strategy,
+                st_test_time,
+                send_button
+            ]
+        )
+
+        def on_send(u_msg, ch, ms, cx, ur, bo, tmp, md, vo, stg, tti, uv):
+            if not isinstance(tti, int):
+                tti = int(tti)
+            if tti < 1:
+                tti = 1
+            if tti > 1000:
+                tti = 1000
+
+            return send_message(
+                user_message=u_msg,
+                chat_history=ch,
+                messages=ms,
+                context=cx,
+                user_name=ur,
+                bot_name=bo,
+                temperature=tmp,
+                model=md,
+                use_voice=uv,
+                voice_gender=vo,
+                strategy=stg,
+                test_time_compute=tti
+            )
+
+        send_button.click(
+            on_send,
+            inputs=[
+                message_input,
+                chat_history,
+                st_messages,
+                st_context,
+                st_user,
+                st_bot,
+                st_temp,
+                st_model,
+                st_voice_gender,
+                st_strategy,
+                st_test_time,
+                use_voice_in
+            ],
+            outputs=[message_input, chat_history, st_messages]
+        )
+
+        voice_input_button.click(
+            transcribe_audio,
+            inputs=None,
+            outputs=message_input
+        )
+
+        def on_clear():
+            return clear_history()
+
+        clear_button.click(
+            on_clear,
+            outputs=[
+                chat_history,
+                st_messages,
+                st_context,
+                st_user,
+                st_bot,
+                st_temp,
+                st_model,
+                st_voice_gender,
+                st_strategy,
+                st_test_time,
+                send_button
+            ]
+        )
+
+        demo.launch(share=False)
+
+    t = threading.Thread(target=launcher.main, daemon=True)
+    t.start()
+
+
+if __name__ == "__main__":
+    run_all()
