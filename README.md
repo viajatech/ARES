@@ -109,3 +109,5 @@ Consulta `LICENSE` para ver los detalles.
   registrándolo todo en logs duales consola+archivo para que nunca pierdas el hilo de tu aventura en el Grid.
 
 ¡Disfruta el viaje al ciber‑universo TRON ARES y lleva tu flujo multimedia al siguiente nivel! 🎇
+
+![](https://github.com/viajatech/ARES/blob/main/ARES%202.0%20.png)
